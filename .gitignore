@@ -4,3 +4,4 @@ build/
 .DS_Store
 .*.jadx-slides.md
 .*.jadx-slides.html
+node_modules/
