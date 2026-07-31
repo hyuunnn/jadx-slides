@@ -36,7 +36,6 @@ class SlidesPlugin : JadxPlugin {
         val gui = context.guiContext ?: return
         Slides.gui = gui
         gui.addMenuAction("Open Slides…") { Slides.openAction() }
-        gui.addMenuAction("Close Slides") { Slides.closeAction() }
         runCatching {
             gui.registerGlobalKeyBinding("jadx-slides:open", "ctrl shift M") { Slides.openAction() }
         }
