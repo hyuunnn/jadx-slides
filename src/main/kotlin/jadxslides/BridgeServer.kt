@@ -17,6 +17,13 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
     private val log = LoggerFactory.getLogger(BridgeServer::class.java)
     private val version = AtomicLong(1)
 
+    // NanoHTTPD logs SEVERE "Broken pipe" whenever the browser drops a
+    // connection mid-response (every live-reload does this); silence its
+    // JUL logger — kept as a field so JUL can't GC the setting away
+    private val nanoLogger = java.util.logging.Logger
+        .getLogger(NanoHTTPD::class.java.name)
+        .apply { level = java.util.logging.Level.OFF }
+
     /** Marp html to serve at `/` and the dir static assets resolve against. */
     @Volatile var deckHtml: File? = null
     @Volatile var deckDir: File? = null
