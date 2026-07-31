@@ -7,8 +7,10 @@ import jadx.api.plugins.gui.JadxGuiContext
 import jadx.gui.ui.MainWindow
 import org.cef.CefClient
 import org.cef.browser.CefBrowser
+import org.cef.handler.CefFocusHandlerAdapter
 import org.slf4j.LoggerFactory
 import java.awt.Desktop
+import java.awt.KeyboardFocusManager
 import java.io.File
 import java.net.URI
 import javax.swing.JFileChooser
@@ -193,6 +195,25 @@ object Slides {
                 val app = CefHolder.getOrBuild { msg -> p.showStatus(msg) }
                 SwingUtilities.invokeLater {
                     val client = app.createClient()
+                    // keys reach both the native browser and whichever Swing
+                    // component holds the AWT focus (the code area — so arrow
+                    // keys moved slides AND code); park the AWT focus while
+                    // the browser owns the keyboard
+                    client.addFocusHandler(object : CefFocusHandlerAdapter() {
+                        private var browserFocus = false
+
+                        override fun onGotFocus(browser: CefBrowser) {
+                            if (browserFocus) return
+                            browserFocus = true
+                            KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                                .clearGlobalFocusOwner()
+                            browser.setFocus(true)
+                        }
+
+                        override fun onTakeFocus(browser: CefBrowser, next: Boolean) {
+                            browserFocus = false
+                        }
+                    })
                     val browser = client.createBrowser(s.url, false, false)
                     cefClient = client
                     cefBrowser = browser
