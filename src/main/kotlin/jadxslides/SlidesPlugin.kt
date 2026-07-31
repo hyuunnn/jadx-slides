@@ -21,7 +21,7 @@ class SlidesPlugin : JadxPlugin {
     override fun getPluginInfo() = JadxPluginInfo(
         "jadx-slides",
         "jadx-slides",
-        "Marp / Slidev slide decks docked inside jadx-gui, with clickable @refs into the decompiled code",
+        "Marp / Slidev slide decks in a jadx-gui tab, with clickable @refs into the decompiled code",
         "https://github.com/hyuunnn/jadx-slides",
         "jadx-slides",
     )
@@ -49,7 +49,8 @@ object Slides {
     @Volatile var gui: JadxGuiContext? = null
     @Volatile var session: DeckSession? = null
 
-    var panel: SlidesPanel? = null // EDT-only
+    private var panel: SlidesPanel? = null // EDT-only
+    private var node: SlidesNode? = null
     private var cefClient: CefClient? = null
     private var cefBrowser: CefBrowser? = null
     private var lastDir: File? = null
@@ -65,6 +66,17 @@ object Slides {
 
     fun mainWindow(): MainWindow? = gui?.mainFrame as? MainWindow
 
+    fun panelOrCreate(): SlidesPanel {
+        panel?.let { return it }
+        val p = SlidesPanel(
+            onReload = { reloadView() },
+            onOpenExternal = { session?.let { openExternal(it.url) } },
+            onClose = { closeAction() },
+        )
+        panel = p
+        return p
+    }
+
     fun openAction() {
         val mw = mainWindow() ?: return
         val chooser = JFileChooser(lastDir ?: File(System.getProperty("user.home")))
@@ -77,12 +89,19 @@ object Slides {
         Thread({ openDeck(file) }, "jadx-slides-open").apply { isDaemon = true }.start()
     }
 
-    fun closeAction() {
-        session?.close()
+    /** Tab dispose calls this — tear the session down but leave the tab alone. */
+    fun onTabClosed() {
+        val s = session
         session = null
+        s?.close()
+        cefBrowser?.loadURL("about:blank")
+    }
+
+    fun closeAction() {
+        onTabClosed()
         SwingUtilities.invokeLater {
-            panel?.detach()
-            cefBrowser?.loadURL("about:blank")
+            val mw = mainWindow() ?: return@invokeLater
+            node?.let { runCatching { mw.tabsController.closeTab(it, false) } }
         }
     }
 
@@ -108,18 +127,15 @@ object Slides {
         }
     }
 
-    /** EDT: dock the panel and attach (or navigate) the browser. */
+    /** EDT: open/select the slides tab and attach (or navigate) the browser. */
     private fun showView(s: DeckSession) {
         val mw = mainWindow() ?: return
-        val p = panel ?: SlidesPanel(
-            onReload = { reloadView() },
-            onOpenExternal = { session?.let { openExternal(it.url) } },
-            onClose = { closeAction() },
-        ).also { panel = it }
+        val p = panelOrCreate()
         p.setDeckName(s.source.name)
-
         if (p.browserComponent == null) p.showStatus("Preparing view…")
-        if (!DockManager.isDocked && !dockOrWindow(mw, p)) return
+
+        val n = node ?: SlidesNode().also { node = it }
+        mw.tabsController.selectTab(n)
 
         val missing = CefHolder.macOpensMissing()
         if (missing.isNotEmpty()) {
@@ -155,13 +171,6 @@ object Slides {
         }, "jadx-slides-cef").apply { isDaemon = true }.start()
     }
 
-    private fun dockOrWindow(mw: MainWindow, p: SlidesPanel): Boolean {
-        if (DockManager.dock(mw, p)) return true
-        log.warn("docking failed — showing the slides in a separate window")
-        p.forceWindow(mw)
-        return true
-    }
-
     private fun useBrowserFallback(s: DeckSession, p: SlidesPanel, missing: List<String>) {
         val opts = missing.joinToString(" ") { "--add-opens=java.desktop/$it=ALL-UNNAMED" }
         p.showStatus(
@@ -187,9 +196,8 @@ object Slides {
         val s = session ?: return
         Thread({
             bridge.bumpVersion()
-            SwingUtilities.invokeLater { cefBrowser?.reload() }
-            if (s.engine == Engine.SLIDEV) {
-                SwingUtilities.invokeLater { cefBrowser?.loadURL(s.url) }
+            SwingUtilities.invokeLater {
+                if (s.engine == Engine.SLIDEV) cefBrowser?.loadURL(s.url) else cefBrowser?.reload()
             }
         }, "jadx-slides-reload").apply { isDaemon = true }.start()
     }

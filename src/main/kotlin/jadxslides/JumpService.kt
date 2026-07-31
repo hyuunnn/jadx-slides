@@ -62,7 +62,6 @@ object JumpService {
             // jump can land after ours and clobber it
             scrollToLine(mw, line, attempt = 0, verified = 0)
         }
-        Slides.session?.focusSlidesSoon()
     }
 
     private fun resolve(d: JadxDecompiler, ref: Ref): JavaNode? {

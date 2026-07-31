@@ -124,10 +124,6 @@ class DeckSession(val source: File, val engine: Engine) {
         }
     }
 
-    fun focusSlidesSoon() {
-        Slides.panel?.focusSoon()
-    }
-
     fun close() {
         pending?.cancel(false)
         debounce.shutdownNow()

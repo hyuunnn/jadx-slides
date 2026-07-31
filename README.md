@@ -1,32 +1,23 @@
 # jadx-slides
 
-Real **Marp** or **Slidev** slide decks docked inside **jadx-gui** — side by
-side with the decompiled code, like [ida-slides](https://github.com/hyuunnn/ida-slides)
-does for IDA Pro.
+Real **Marp** or **Slidev** slide decks inside a **jadx-gui tab** — the jadx
+port of [ida-slides](https://github.com/hyuunnn/ida-slides).
 
 Write `@com.example.app.MainActivity` or `@Lcom/foo/Bar;->run()V` anywhere in
 the deck and it becomes a clickable link; clicking it jumps the jadx code view
-to that class, member, or line — while the slides stay put on the right.
+to that class, member, or line. The deck renders in an embedded Chromium
+(JCEF) browser inside a regular jadx tab, opened through the normal tab
+flow — no changes to jadx's own layout.
 
-```
-┌─────────────────────────────────────────────┐
-│ jadx-gui                                    │
-├──────────┬──────────────────┬───────────────┤
-│  class   │   code tabs      │   slides      │
-│  tree    │   (decompiled)   │   (JCEF)      │
-│          │  ← @refs jump    │   always      │
-│          │    only here     │   visible     │
-└──────────┴──────────────────┴───────────────┘
-```
+Prefer slides and code visible at the same time? Hit the **Browser** button
+(or let the fallback kick in): the deck opens in the system browser and the
+`@` jump links keep working there, so a browser window next to jadx gives
+the same side-by-side setup.
 
 ## Usage
 
 1. `Ctrl+Shift+M` (or Plugins → jadx-slides → Open Slides…)
 2. Pick your Markdown deck (`.md`; marp-exported `.html` also loads)
-
-The slides panel is injected next to the code tabs (the divider is
-draggable). The **Window** button pops the same panel out into its own
-window; **Browser** opens the deck in the system browser instead.
 
 The engine is picked per deck:
 
@@ -55,9 +46,8 @@ JADX_GUI_OPTS="--add-opens=java.desktop/sun.awt=ALL-UNNAMED --add-opens=java.des
 ```
 
 Without them (or if JCEF fails for any reason) the deck opens in the system
-browser instead — `@` jump links still work there, so a browser window next
-to jadx is a perfectly usable fallback. On first use JCEF downloads ~100MB
-of natives into `~/.cache/jadx-slides/jcef` (one time).
+browser instead — jump links still work there. On first use JCEF downloads
+~100MB of natives into `~/.cache/jadx-slides/jcef` (one time).
 
 ## `@` reference syntax
 
@@ -73,9 +63,6 @@ Renamed items match on both the original and the alias name, so decks keep
 working as you rename during analysis. Tokens inside fenced code blocks,
 inline backticks, and the front matter are left alone so decks can document
 the syntax itself. Unknown names are logged to the jadx log when clicked.
-
-Jumps try to hand keyboard focus back to the deck so the arrow keys keep
-driving slides.
 
 ## Writing decks
 
@@ -97,15 +84,15 @@ jadx plugins --install-jar build/libs/jadx-slides-0.1.0.jar
 
 ## Implementation notes
 
-- jadx has no docking framework and no generic tab split (the 1.5.6 "split
-  view" is a dedicated Java/Smali sync view), so the plugin reparents jadx's
-  `TabbedPane` into a horizontal `JSplitPane` and takes the other half.
-  Undocking restores the original hierarchy. This uses jadx-gui internals —
-  possible because the plugin classloader's parent is the app classloader.
-- Rendering is a local NanoHTTPD bridge + a JCEF browser embedded in the
-  panel. The bridge also serves `/jump`, so the same deck works identically
-  in the embedded view and in an external browser (CORS is open for the
-  Slidev dev-server origin).
+- The slides tab is a custom `JNode`/`ContentPanel` opened via jadx's own
+  `TabsController` — the additive pattern jadx half-sanctions (it even
+  exposes `registerTabStatePersistAdapter` for custom tabs). Unknown node
+  types are skipped when jadx persists open tabs, so the slides tab simply
+  isn't restored on project reopen.
+- Rendering is a local NanoHTTPD bridge + a JCEF browser in the tab. The
+  bridge also serves `/jump`, so the same deck works identically in the
+  embedded view and in an external browser (CORS is open for the Slidev
+  dev-server origin).
 - CefApp is created once and never disposed (CEF cannot re-init in one JVM);
   jadx re-instantiates plugins per project open, so all long-lived state
   lives in a process-wide singleton.
