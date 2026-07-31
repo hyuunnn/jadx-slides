@@ -65,8 +65,9 @@ object CefHolder {
             // run; CefApp.shutdown lazily loads anonymous inner classes at
             // that point and dies with NoClassDefFoundError — load them now
             val cl = CefHolder::class.java.classLoader
-            for (i in 1..10) {
-                runCatching { Class.forName("org.cef.CefApp\$$i", true, cl) }
+            val inner = (1..10).map { "$it" } + "6\$1"
+            for (suffix in inner) {
+                runCatching { Class.forName("org.cef.CefApp\$$suffix", true, cl) }
             }
             app = built
             return built
