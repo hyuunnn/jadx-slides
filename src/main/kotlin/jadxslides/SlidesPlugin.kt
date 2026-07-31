@@ -55,6 +55,8 @@ object Slides {
     private var cefBrowser: CefBrowser? = null
     private var lastDir: File? = null
     private var macOpensWarned = false
+    private var docked = false // EDT-only
+    private var movingPanel = false // tab close caused by dock toggle, not the user
 
     private val bridgeLazy = lazy {
         BridgeServer().also {
@@ -91,6 +93,7 @@ object Slides {
 
     /** Tab dispose calls this — tear the session down but leave the tab alone. */
     fun onTabClosed() {
+        if (movingPanel) return // the dock toggle is relocating the panel, not closing
         val s = session
         session = null
         s?.close()
@@ -98,10 +101,44 @@ object Slides {
     }
 
     fun closeAction() {
+        movingPanel = false
         onTabClosed()
         SwingUtilities.invokeLater {
+            if (docked) {
+                DockManager.undock()
+                docked = false
+                panel?.setDockedUi(false)
+            }
             val mw = mainWindow() ?: return@invokeLater
             node?.let { runCatching { mw.tabsController.closeTab(it, false) } }
+        }
+    }
+
+    /** EDT: move the panel between the slides tab and a split beside the code. */
+    fun toggleDock() {
+        val mw = mainWindow() ?: return
+        val p = panelOrCreate()
+        if (!docked) {
+            movingPanel = true
+            try {
+                node?.let { runCatching { mw.tabsController.closeTab(it, false) } }
+            } finally {
+                movingPanel = false
+            }
+            if (DockManager.dock(mw, p)) {
+                docked = true
+                p.setDockedUi(true)
+            } else {
+                // docking failed — fall back to the tab
+                val n = node ?: SlidesNode().also { node = it }
+                mw.tabsController.selectTab(n)
+            }
+        } else {
+            DockManager.undock()
+            docked = false
+            p.setDockedUi(false)
+            val n = node ?: SlidesNode().also { node = it }
+            mw.tabsController.selectTab(n)
         }
     }
 
@@ -134,8 +171,10 @@ object Slides {
         p.setDeckName(s.source.name)
         if (p.browserComponent == null) p.showStatus("Preparing view…")
 
-        val n = node ?: SlidesNode().also { node = it }
-        mw.tabsController.selectTab(n)
+        if (!docked) {
+            val n = node ?: SlidesNode().also { node = it }
+            mw.tabsController.selectTab(n)
+        }
 
         val missing = CefHolder.macOpensMissing()
         if (missing.isNotEmpty()) {

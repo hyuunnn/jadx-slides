@@ -9,10 +9,16 @@ to that class, member, or line. The deck renders in an embedded Chromium
 (JCEF) browser inside a regular jadx tab, opened through the normal tab
 flow — no changes to jadx's own layout.
 
-Prefer slides and code visible at the same time? Hit the **Browser** button
-(or let the fallback kick in): the deck opens in the system browser and the
-`@` jump links keep working there, so a browser window next to jadx gives
-the same side-by-side setup.
+Prefer slides and code visible at the same time? Two options:
+
+- **Dock** (toolbar button): splits the main window — code tabs on the
+  left, slides pinned on the right, exactly the ida-slides layout. Jumps
+  move only the code side. Press **Tab** to go back to a regular tab.
+  (This reparents jadx's tab area into a split pane at runtime — contained
+  and fully reversible, but it does go beyond the official plugin API,
+  which is why it's opt-in rather than the default.)
+- **Browser**: the deck opens in the system browser and the `@` jump links
+  keep working there, so a browser window next to jadx works the same way.
 
 ## Usage
 

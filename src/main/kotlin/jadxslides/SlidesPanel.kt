@@ -27,6 +27,7 @@ class SlidesPanel(
     private val title = JLabel("", SwingConstants.LEFT)
     private val status = JLabel("Starting…", SwingConstants.CENTER)
     private val content = JPanel(BorderLayout())
+    private val dockToggle = JButton("Dock")
 
     var browserComponent: Component? = null
         private set
@@ -43,6 +44,10 @@ class SlidesPanel(
             toolTipText = "Open the deck in the system browser"
             addActionListener { onOpenExternal() }
         })
+        bar.add(dockToggle.apply {
+            toolTipText = "Show the slides beside the code (split the main window)"
+            addActionListener { Slides.toggleDock() }
+        })
         bar.add(JButton("Close").apply { addActionListener { onClose() } })
         add(bar, BorderLayout.NORTH)
 
@@ -52,6 +57,15 @@ class SlidesPanel(
 
     fun setDeckName(name: String) = onEdt {
         title.text = name
+    }
+
+    fun setDockedUi(docked: Boolean) = onEdt {
+        dockToggle.text = if (docked) "Tab" else "Dock"
+        dockToggle.toolTipText = if (docked) {
+            "Move the slides back into a regular tab"
+        } else {
+            "Show the slides beside the code (split the main window)"
+        }
     }
 
     fun showStatus(text: String) = onEdt {
