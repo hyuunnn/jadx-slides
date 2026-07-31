@@ -2,6 +2,7 @@ package jadxslides
 
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Path
@@ -73,9 +74,18 @@ object Engines {
         }
     }
 
+    private fun portOpen(host: String, port: Int): Boolean = try {
+        Socket().use { it.connect(InetSocketAddress(host, port), 200) }
+        true
+    } catch (_: Exception) {
+        false
+    }
+
     /** A running slidev dev server bound to a local port. */
-    class SlidevServer(private val process: Process, val port: Int) {
-        val url: String get() = "http://localhost:$port/"
+    class SlidevServer(private val process: Process, val port: Int, host: String) {
+        // vite may listen on one stack only (Node ≥17 binds "localhost" to
+        // ::1); point at the address that actually answered
+        val url: String = if (host.contains(':')) "http://[$host]:$port/" else "http://$host:$port/"
         fun stop() {
             process.destroy()
             if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()
@@ -97,23 +107,37 @@ object Engines {
             pb.environment().putAll(CliDiscovery.childEnv(slidev))
             pb.redirectErrorStream(true)
             val proc = pb.start()
-            // drain output so the child never blocks on a full pipe
+            // drain output so the child never blocks on a full pipe; keep a
+            // tail so startup failures carry a real reason
+            val tail = ArrayDeque<String>()
             Thread {
-                proc.inputStream.bufferedReader().forEachLine { LOG.debug("slidev: {}", it) }
+                proc.inputStream.bufferedReader().forEachLine {
+                    LOG.debug("slidev: {}", it)
+                    synchronized(tail) {
+                        tail.addLast(it)
+                        if (tail.size > 15) tail.removeFirst()
+                    }
+                }
             }.apply { isDaemon = true; name = "jadx-slides-slidev-log" }.start()
+
+            fun lastOutput() = synchronized(tail) {
+                tail.filter { it.isNotBlank() }.takeLast(4).joinToString("\n")
+            }
 
             val deadline = System.currentTimeMillis() + 60_000
             while (System.currentTimeMillis() < deadline) {
-                if (!proc.isAlive) return null to "slidev exited early — see log"
-                try {
-                    Socket("127.0.0.1", port).use { }
-                    return SlidevServer(proc, port) to null
-                } catch (_: Exception) {
-                    Thread.sleep(300)
+                if (!proc.isAlive) {
+                    return null to "slidev exited early:\n${lastOutput()}"
                 }
+                // Node ≥17 may bind "localhost" to ::1 only — probe both stacks
+                val host = listOf("127.0.0.1", "::1").firstOrNull { portOpen(it, port) }
+                if (host != null) {
+                    return SlidevServer(proc, port, host) to null
+                }
+                Thread.sleep(300)
             }
             proc.destroyForcibly()
-            null to "slidev did not start within 60s"
+            null to "slidev did not start within 60s:\n${lastOutput()}"
         } catch (e: Exception) {
             LOG.error("slidev spawn failed", e)
             null to "failed to start slidev: ${e.message}"
