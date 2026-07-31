@@ -24,7 +24,7 @@ class SlidesPanel(
     private val onClose: () -> Unit,
 ) : JPanel(BorderLayout()) {
 
-    private val title = JLabel("", SwingConstants.LEFT)
+    private val title = JLabel("jadx-slides", SwingConstants.LEFT)
     private val status = JLabel("Starting…", SwingConstants.CENTER)
     private val content = JPanel(BorderLayout())
     private val dockToggle = JButton("Dock")
@@ -56,7 +56,8 @@ class SlidesPanel(
     }
 
     fun setDeckName(name: String) = onEdt {
-        title.text = name
+        // the label stays the plugin name; the open deck shows as a tooltip
+        title.toolTipText = name
     }
 
     fun setDockedUi(docked: Boolean) = onEdt {
