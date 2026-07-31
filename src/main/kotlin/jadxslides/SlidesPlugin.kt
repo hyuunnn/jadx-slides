@@ -59,6 +59,38 @@ object Slides {
     private var docked = false // EDT-only
     private var movingPanel = false // tab close caused by dock toggle, not the user
     private var cefCleanupInstalled = false
+    private var keyGuardInstalled = false
+
+    /** True while the CEF browser owns the keyboard (last click was on slides). */
+    @Volatile private var browserHasKeyboard = false
+
+    private val NAV_KEYS = setOf(
+        java.awt.event.KeyEvent.VK_LEFT, java.awt.event.KeyEvent.VK_RIGHT,
+        java.awt.event.KeyEvent.VK_UP, java.awt.event.KeyEvent.VK_DOWN,
+        java.awt.event.KeyEvent.VK_PAGE_UP, java.awt.event.KeyEvent.VK_PAGE_DOWN,
+        java.awt.event.KeyEvent.VK_HOME, java.awt.event.KeyEvent.VK_END,
+        java.awt.event.KeyEvent.VK_SPACE,
+    )
+
+    /**
+     * macOS delivers key events to the native browser AND down the AWT
+     * pipeline (whose focus owner can silently revert to the code area), so
+     * arrow keys moved slides and code together. While the browser owns the
+     * keyboard, swallow navigation keys before Swing can dispatch them —
+     * the native side still gets them, so the deck keeps working.
+     */
+    private fun installKeyGuard() {
+        if (keyGuardInstalled) return
+        keyGuardInstalled = true
+        val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        kfm.addKeyEventDispatcher { e -> browserHasKeyboard && e.keyCode in NAV_KEYS }
+        kfm.addPropertyChangeListener("focusOwner") { ev ->
+            val owner = ev.newValue as? java.awt.Component
+            if (owner != null && owner !== panel?.browserComponent) {
+                browserHasKeyboard = false // user clicked into a Swing component
+            }
+        }
+    }
 
     private val bridgeLazy = lazy {
         BridgeServer().also {
@@ -200,20 +232,19 @@ object Slides {
                     // keys moved slides AND code); park the AWT focus while
                     // the browser owns the keyboard
                     client.addFocusHandler(object : CefFocusHandlerAdapter() {
-                        private var browserFocus = false
-
                         override fun onGotFocus(browser: CefBrowser) {
-                            if (browserFocus) return
-                            browserFocus = true
+                            if (browserHasKeyboard) return
+                            browserHasKeyboard = true
                             KeyboardFocusManager.getCurrentKeyboardFocusManager()
                                 .clearGlobalFocusOwner()
                             browser.setFocus(true)
                         }
 
                         override fun onTakeFocus(browser: CefBrowser, next: Boolean) {
-                            browserFocus = false
+                            browserHasKeyboard = false
                         }
                     })
+                    installKeyGuard()
                     val browser = client.createBrowser(s.url, false, false)
                     cefClient = client
                     cefBrowser = browser
