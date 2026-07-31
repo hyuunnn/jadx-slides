@@ -41,6 +41,9 @@ object CefHolder {
             val builder = CefAppBuilder()
             builder.setInstallDir(installDir)
             builder.cefSettings.windowless_rendering_enabled = false
+            // unset root_cache_path makes CEF warn and can collide with other
+            // JCEF apps' process singletons
+            builder.cefSettings.root_cache_path = File(installDir, "cache").absolutePath
             builder.setProgressHandler(object : IProgressHandler {
                 override fun handleProgress(state: EnumProgress, percent: Float) {
                     val pct = if (percent >= 0) " ${percent.toInt()}%" else ""

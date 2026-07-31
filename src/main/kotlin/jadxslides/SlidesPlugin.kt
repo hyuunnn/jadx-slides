@@ -59,6 +59,7 @@ object Slides {
     private var macOpensWarned = false
     private var docked = false // EDT-only
     private var movingPanel = false // tab close caused by dock toggle, not the user
+    private var cefCleanupInstalled = false
 
     private val bridgeLazy = lazy {
         BridgeServer().also {
@@ -217,6 +218,7 @@ object Slides {
                     val browser = client.createBrowser(s.url, false, false)
                     cefClient = client
                     cefBrowser = browser
+                    installCefCleanup(mw)
                     p.attachBrowser(browser.uiComponent)
                     p.focusSoon()
                 }
@@ -250,6 +252,28 @@ object Slides {
                 JOptionPane.INFORMATION_MESSAGE,
             )
         }
+    }
+
+    /**
+     * Close the browser before CEF's native teardown: JCEF on macOS is known
+     * to crash in TempWindowMac::~TempWindowMac at quit when browsers are
+     * still alive (harmless — jadx has already saved — but ugly).
+     */
+    private fun installCefCleanup(mw: MainWindow) {
+        if (cefCleanupInstalled) return
+        cefCleanupInstalled = true
+        mw.addWindowListener(object : java.awt.event.WindowAdapter() {
+            override fun windowClosing(e: java.awt.event.WindowEvent) = disposeCef()
+            override fun windowClosed(e: java.awt.event.WindowEvent) = disposeCef()
+        })
+        Runtime.getRuntime().addShutdownHook(Thread({ disposeCef() }, "jadx-slides-cef-cleanup"))
+    }
+
+    private fun disposeCef() {
+        runCatching { cefBrowser?.close(true) }
+        cefBrowser = null
+        runCatching { cefClient?.dispose() }
+        cefClient = null
     }
 
     private fun reloadView() {
