@@ -49,7 +49,7 @@ object CefHolder {
             // native teardown while AWT still updates the browser view;
             // route quit through jadx's normal window-close flow instead
             builder.setAppHandler(object : MavenCefAppHandlerAdapter() {
-                override fun handleBeforeTerminate(): Boolean {
+                override fun onBeforeTerminate(): Boolean {
                     Slides.requestQuit()
                     return true
                 }
