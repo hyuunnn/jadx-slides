@@ -1,3 +1,5 @@
+English | [한국어](README_ko.md)
+
 # jadx-slides
 
 Real **Marp** or **Slidev** slide decks inside a **jadx-gui tab** — the jadx
@@ -84,7 +86,7 @@ paths keep working, and both are removed when the deck is closed.
 ## Build & install
 
 ```sh
-gradle shadowJar
+./gradlew shadowJar
 jadx plugins --install-jar build/libs/jadx-slides-0.1.0.jar
 ```
 
