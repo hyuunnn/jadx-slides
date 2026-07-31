@@ -61,6 +61,13 @@ object CefHolder {
                 }
             })
             val built = builder.build()
+            // jadx closes the plugin classloader before JVM shutdown hooks
+            // run; CefApp.shutdown lazily loads anonymous inner classes at
+            // that point and dies with NoClassDefFoundError — load them now
+            val cl = CefHolder::class.java.classLoader
+            for (i in 1..10) {
+                runCatching { Class.forName("org.cef.CefApp\$$i", true, cl) }
+            }
             app = built
             return built
         }
