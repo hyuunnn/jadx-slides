@@ -109,4 +109,3 @@ jadx plugins --install-jar build/libs/jadx-slides-0.1.0.jar
 - `@name[1:8]` 임베드: 디컴파일된 코드 라인을 덱에 코드 블록으로 삽입
 - `@` 링크 호버 시 디컴파일 코드 미리보기
 - 코드 뷰 우클릭 "Copy @reference" 액션
-- 덱 린트 (저장 시 해석 불가 토큰 보고)

@@ -112,4 +112,3 @@ jadx plugins --install-jar build/libs/jadx-slides-0.1.0.jar
 - `@name[1:8]` embeds: paste decompiled lines into the deck as code blocks
 - Hover preview of decompiled code on `@` links
 - "Copy @reference" context-menu action in the code view
-- Deck lint (report unresolvable tokens on save)
