@@ -87,6 +87,15 @@ class SlidesPanel(
         content.repaint()
     }
 
+    /** Remove the browser from the hierarchy so AWT stops sending it UI updates. */
+    fun detachBrowser() = onEdt {
+        browserComponent = null
+        content.removeAll()
+        content.add(status, BorderLayout.CENTER)
+        content.revalidate()
+        content.repaint()
+    }
+
     /** Focus the deck (e.g. right after it is attached) so arrow keys work. */
     fun focusSoon() {
         val t = Timer(350) { browserComponent?.requestFocusInWindow() }

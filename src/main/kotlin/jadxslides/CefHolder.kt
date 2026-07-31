@@ -3,6 +3,7 @@ package jadxslides
 import me.friwi.jcefmaven.CefAppBuilder
 import me.friwi.jcefmaven.EnumProgress
 import me.friwi.jcefmaven.IProgressHandler
+import me.friwi.jcefmaven.MavenCefAppHandlerAdapter
 import org.cef.CefApp
 import java.io.File
 
@@ -44,6 +45,15 @@ object CefHolder {
             // unset root_cache_path makes CEF warn and can collide with other
             // JCEF apps' process singletons
             builder.cefSettings.root_cache_path = File(installDir, "cache").absolutePath
+            // CEF intercepts macOS Cmd+Q and exits abruptly, crashing in
+            // native teardown while AWT still updates the browser view;
+            // route quit through jadx's normal window-close flow instead
+            builder.setAppHandler(object : MavenCefAppHandlerAdapter() {
+                override fun handleBeforeTerminate(): Boolean {
+                    Slides.requestQuit()
+                    return true
+                }
+            })
             builder.setProgressHandler(object : IProgressHandler {
                 override fun handleProgress(state: EnumProgress, percent: Float) {
                     val pct = if (percent >= 0) " ${percent.toInt()}%" else ""

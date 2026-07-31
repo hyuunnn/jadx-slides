@@ -269,10 +269,29 @@ object Slides {
     }
 
     private fun disposeCef() {
+        // detach first: a still-parented browser keeps receiving AWT UI
+        // updates and crashes in util_mac::UpdateView during teardown
+        panel?.detachBrowser()
         runCatching { cefBrowser?.close(true) }
         cefBrowser = null
         runCatching { cefClient?.dispose() }
         cefClient = null
+    }
+
+    /** CEF's macOS Cmd+Q handler lands here (AppKit thread): clean up the
+     * browser, then hand the quit to jadx's normal window-close flow. */
+    fun requestQuit() {
+        SwingUtilities.invokeLater {
+            disposeCef()
+            val mw = mainWindow()
+            if (mw != null) {
+                mw.dispatchEvent(
+                    java.awt.event.WindowEvent(mw, java.awt.event.WindowEvent.WINDOW_CLOSING),
+                )
+            } else {
+                Runtime.getRuntime().exit(0)
+            }
+        }
     }
 
     private fun reloadView() {
