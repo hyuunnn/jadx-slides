@@ -49,8 +49,10 @@ object Engines {
             ?: return "marp CLI not found — install with: npm i -g @marp-team/marp-cli"
         return try {
             val pb = ProcessBuilder(
-                marp.absolutePath, prepared.toString(),
-                "-o", out.toString(), "--html", "--no-stdin",
+                CliDiscovery.command(
+                    marp, prepared.toString(),
+                    "-o", out.toString(), "--html", "--no-stdin",
+                ),
             )
             pb.directory(prepared.parent.toFile())
             pb.environment().putAll(CliDiscovery.childEnv(marp))
@@ -86,8 +88,10 @@ object Engines {
         val port = ServerSocket(0).use { it.localPort }
         return try {
             val pb = ProcessBuilder(
-                slidev.absolutePath, prepared.fileName.toString(),
-                "--port", port.toString(),
+                CliDiscovery.command(
+                    slidev, prepared.fileName.toString(),
+                    "--port", port.toString(),
+                ),
             )
             pb.directory(prepared.parent.toFile())
             pb.environment().putAll(CliDiscovery.childEnv(slidev))

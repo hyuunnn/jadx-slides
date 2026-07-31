@@ -51,6 +51,20 @@ object CliDiscovery {
     }
 
     /**
+     * Command line for spawning a tool: Windows .cmd/.bat launcher shims
+     * cannot be exec'd directly (CreateProcess error 193) and must go
+     * through cmd.exe.
+     */
+    fun command(tool: File, vararg args: String): List<String> {
+        val ext = tool.extension.lowercase()
+        return if (isWindows && (ext == "cmd" || ext == "bat")) {
+            listOf("cmd.exe", "/c", tool.absolutePath) + args
+        } else {
+            listOf(tool.absolutePath) + args
+        }
+    }
+
+    /**
      * Child-process env with the tool's own dir (and a found node dir)
      * prepended to PATH, so npm launcher shims can locate `node`.
      */
