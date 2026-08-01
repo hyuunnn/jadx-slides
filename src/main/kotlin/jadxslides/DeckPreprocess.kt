@@ -38,7 +38,9 @@ object DeckPreprocess {
         "script" to Regex("(?i)</script\\s*>"),
     )
 
-    private val INLINE_CODE_RE = Regex("`[^`]*`")
+    // backreference so double-backtick spans (``@x``) match as ONE span —
+    // `[^`]*` would see two empty spans and leave the token exposed
+    private val INLINE_CODE_RE = Regex("(`+)[^`]*?\\1")
 
     private const val LINK_STYLE =
         "color:#4fc3f7;text-decoration:underline;cursor:pointer;font-weight:600"
@@ -79,12 +81,12 @@ object DeckPreprocess {
 
         val out = ArrayList<String>(lines.size)
         out.addAll(head)
+        // the two line-state machines are mutually exclusive, raw HTML first:
+        // a line-leading ``` inside a <script> template literal must not open
+        // a phantom fence (which would then hide the </script> forever)
+        val fences = MarpMarkdown.FenceTracker()
         var rawTag: String? = null // inside a <style>/<script> block
-        for ((line, inCode) in MarpMarkdown.iterFenced(body)) {
-            if (inCode) {
-                out.add(line)
-                continue
-            }
+        for (line in body) {
             // a `<style>` mentioned in backticks is prose, not an open tag —
             // match tags against the line with inline-code spans blanked out
             val masked = INLINE_CODE_RE.replace(line) { " ".repeat(it.value.length) }
@@ -92,6 +94,10 @@ object DeckPreprocess {
             if (tag != null) {
                 out.add(line)
                 if (HTML_RAW_CLOSE.getValue(tag).containsMatchIn(masked)) rawTag = null
+                continue
+            }
+            if (fences.feed(line)) {
+                out.add(line)
                 continue
             }
             val open = HTML_RAW_OPEN.find(masked)

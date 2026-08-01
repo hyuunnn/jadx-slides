@@ -133,6 +133,7 @@ object Engines {
         val slidev = CliDiscovery.find("slidev")
             ?: return null to "slidev CLI not found — install with: npm i -g @slidev/cli @slidev/theme-default"
         val port = ServerSocket(0).use { it.localPort }
+        var started: Process? = null
         return try {
             val pb = ProcessBuilder(
                 CliDiscovery.command(
@@ -144,6 +145,7 @@ object Engines {
             pb.environment().putAll(CliDiscovery.childEnv(slidev))
             pb.redirectErrorStream(true)
             val proc = pb.start()
+            started = proc
             // drain output so the child never blocks on a full pipe; keep a
             // tail so startup failures carry a real reason and the banner
             // (with the authoritative URL) stays parseable
@@ -191,8 +193,15 @@ object Engines {
             }
             killTreeForcibly(proc)
             null to "slidev did not start within 60s:\n${lastOutput()}"
+        } catch (e: InterruptedException) {
+            // session closed while we waited for the banner — the node tree
+            // is already running and must not outlive us (mirrors renderMarp)
+            started?.let { killTreeForcibly(it) }
+            Thread.currentThread().interrupt()
+            null to "slidev startup interrupted"
         } catch (e: Exception) {
             LOG.error("slidev spawn failed", e)
+            started?.let { killTreeForcibly(it) }
             null to "failed to start slidev: ${e.message}"
         }
     }

@@ -25,7 +25,9 @@ object JumpService {
         val lm = Regex("^(.*):(\\d+)$").find(t)
         if (lm != null) {
             t = lm.groupValues[1]
-            line = lm.groupValues[2].toInt()
+            // an over-long digit run must not abort the whole jump —
+            // drop the line part and still open the class
+            line = lm.groupValues[2].toIntOrNull()
         }
         if (t.startsWith("L") && t.contains(";")) {
             val cls = t.substringBefore(";").removePrefix("L").replace('/', '.')

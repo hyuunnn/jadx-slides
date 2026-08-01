@@ -163,6 +163,13 @@ object Slides {
     }
 
     fun openAction() {
+        // jadx runs plugin MENU actions on its background executor, not the
+        // EDT (the key-binding path IS the EDT) — a Swing file dialog must
+        // never be built off the EDT, and hopping also serializes lastDir
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater { openAction() }
+            return
+        }
         val mw = mainWindow() ?: return
         val chooser = JFileChooser(lastDir ?: File(System.getProperty("user.home")))
         chooser.fileFilter = FileNameExtensionFilter(
@@ -258,7 +265,11 @@ object Slides {
             val engine = Engines.detect(file.toPath(), text)
             val session0 = DeckSession(file, engine)
             s = session0
-            pendingSession = session0
+            if (!registerPending(session0)) {
+                // quit already drained the closer — close inline, right here
+                CloseTask(session0).run()
+                return
+            }
             val err = session0.prepare(bridge)
             if (err != null) {
                 clearPending(session0)
@@ -268,17 +279,12 @@ object Slides {
             }
             SwingUtilities.invokeLater {
                 clearPending(session0)
-                if (gen != openGen.get()) {
-                    // a newer open or a close superseded this one
+                // publish is atomic against quit's supersede — the winner
+                // takes over the bridge, a loser is closed
+                if (!tryPublish(gen, session0)) {
                     closeSessionAsync(session0)
                     return@invokeLater
                 }
-                val old = session
-                session = session0
-                // the winner takes over the bridge here, under the gen
-                // check — a slower losing prepare can no longer clobber it
-                session0.publishTo(bridge)
-                closeSessionAsync(old)
                 showView(session0)
             }
         } catch (t: Throwable) {
@@ -296,6 +302,38 @@ object Slides {
     @Synchronized
     private fun clearPending(mine: DeckSession) {
         if (pendingSession === mine) pendingSession = null
+    }
+
+    /** Register an in-flight session, unless quit already drained the close
+     * worker — then refuse so the caller closes it inline instead of racing
+     * an exit that will never run the EDT continuation. */
+    @Synchronized
+    private fun registerPending(s: DeckSession): Boolean {
+        if (closer.isShutdown) return false
+        pendingSession = s
+        return true
+    }
+
+    /** Atomically supersede current + in-flight sessions (quit/tab-close). */
+    @Synchronized
+    private fun takeSessionsForClose(): List<DeckSession> {
+        openGen.incrementAndGet()
+        val taken = listOfNotNull(session, pendingSession)
+        session = null
+        pendingSession = null
+        return taken
+    }
+
+    /** EDT publish under the generation check, atomic against quit's
+     * supersede — returns false if this open lost the race. */
+    @Synchronized
+    private fun tryPublish(gen: Long, s: DeckSession): Boolean {
+        if (gen != openGen.get()) return false
+        val old = session
+        session = s
+        s.publishTo(bridge)
+        if (old != null) closeSessionAsync(old)
+        return true
     }
 
     /** EDT: open/select the slides tab and attach (or navigate) the browser. */
@@ -365,8 +403,12 @@ object Slides {
                             override fun onGotFocus(browser: CefBrowser) {
                                 if (browserHasKeyboard) return
                                 browserHasKeyboard = true
-                                KeyboardFocusManager.getCurrentKeyboardFocusManager()
-                                    .clearGlobalFocusOwner()
+                                // CEF calls this on the AppKit thread —
+                                // AWT focus state must be mutated on the EDT
+                                SwingUtilities.invokeLater {
+                                    KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                                        .clearGlobalFocusOwner()
+                                }
                                 browser.setFocus(true)
                             }
 
@@ -458,6 +500,10 @@ object Slides {
                 // thread waits for this dispose to finish) — the perfect
                 // moment to defuse CEF's native shutdown
                 neutralizeCefShutdown()
+                // File→Exit skips windowClosing entirely — detach here on
+                // the EDT so the browser leaves the hierarchy as early as
+                // that path allows (no-op when windowClosing already ran)
+                detachCefForQuit()
                 // windowClosed fires on the EDT but quitCleanup blocks on
                 // process shutdown — run it on a worker the JVM waits for.
                 // This (plus the shutdown hook) also covers jadx's Exit menu,
@@ -472,12 +518,7 @@ object Slides {
      * the browser (must precede dispose(): util_mac::UpdateView crash) and
      * kick the session close so all its classes load now. */
     private fun beginQuitCleanup() {
-        openGen.incrementAndGet()
-        val s = session
-        session = null
-        closeSessionAsync(s)
-        closeSessionAsync(pendingSession) // an open still in flight
-        pendingSession = null
+        takeSessionsForClose().forEach { closeSessionAsync(it) }
         detachCefForQuit()
         panel?.showStatus(
             "View released for shutdown.<br>" +
@@ -507,12 +548,7 @@ object Slides {
     private fun quitCleanup() {
         try {
             neutralizeCefShutdown() // backup for the shutdown-hook race
-            openGen.incrementAndGet()
-            val s = session
-            session = null
-            closeSessionAsync(s)
-            closeSessionAsync(pendingSession) // an open still in flight
-            pendingSession = null
+            takeSessionsForClose().forEach { closeSessionAsync(it) }
             closer.shutdown()
             try {
                 closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
@@ -593,6 +629,13 @@ object Slides {
             return
         }
         if (cefBrowser == null) {
+            if (CefHolder.macOpensMissing().isNotEmpty()) {
+                // browser-fallback mode: the external browser reloads itself
+                // via the /version poll — re-entering showView would open
+                // one more duplicate browser tab per click
+                bridge.bumpVersion()
+                return
+            }
             // the view was released but the session survived — just rebuild
             showView(s)
             return

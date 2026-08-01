@@ -66,6 +66,12 @@ class DeckSession(val source: File, val engine: Engine) {
                 val (server, err) = Engines.startSlidev(prepared.toPath())
                 if (server == null) return err ?: "slidev failed"
                 slidev = server
+                // a close() racing this prepare saw slidev == null and
+                // stopped nothing — re-check after publishing the field
+                if (closed.get()) {
+                    server.stop()
+                    return "deck was closed during slidev startup"
+                }
                 url = server.url
             }
         }
@@ -116,8 +122,13 @@ class DeckSession(val source: File, val engine: Engine) {
     }
 
     private fun scheduleRerender(bridge: BridgeServer) {
-        pending?.cancel(false)
-        pending = debounce.schedule({ rerender(bridge) }, 250, TimeUnit.MILLISECONDS)
+        try {
+            pending?.cancel(false)
+            pending = debounce.schedule({ rerender(bridge) }, 250, TimeUnit.MILLISECONDS)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // a save landed inside close()'s drain window — the executor is
+            // already shut down and the session is going away; not an error
+        }
     }
 
     private fun rerender(bridge: BridgeServer) {

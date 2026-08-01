@@ -27,15 +27,17 @@ object MarpMarkdown {
     }
 
     /**
-     * Pair each line with `inCode` using CommonMark fence tracking: a closing
-     * fence must repeat the opening character and be at least as long — an
-     * inner ``` does not close a ```` block, and a tilde fence is not closed
-     * by a backtick fence. Fence marker lines themselves count as code.
+     * Line-by-line CommonMark fence tracking: a closing fence must repeat
+     * the opening character and be at least as long — an inner ``` does not
+     * close a ```` block, and a tilde fence is not closed by a backtick
+     * fence. `feed` returns true for fence marker lines themselves and for
+     * every line inside an open fence. Stateful so callers can interleave
+     * other line-state machines (raw HTML blocks) with priority.
      */
-    fun iterFenced(lines: List<String>): List<Pair<String, Boolean>> {
-        var fence: String? = null
-        val out = ArrayList<Pair<String, Boolean>>(lines.size)
-        for (line in lines) {
+    class FenceTracker {
+        private var fence: String? = null
+
+        fun feed(line: String): Boolean {
             val m = FENCE_RE.find(line)
             if (m != null) {
                 val marker = m.groupValues[1]
@@ -45,12 +47,10 @@ object MarpMarkdown {
                 } else if (marker[0] == f[0] && marker.length >= f.length) {
                     fence = null
                 }
-                out.add(line to true)
-                continue
+                return true
             }
-            out.add(line to (fence != null))
+            return fence != null
         }
-        return out
     }
 
     /** Normalize a front-matter scalar: drop unquoted inline comments and quotes. */
