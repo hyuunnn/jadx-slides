@@ -90,11 +90,31 @@ class SlidesPanel(
     /** Remove the browser from the hierarchy so AWT stops sending it UI updates. */
     fun detachBrowser() = onEdt { doDetach() }
 
+    /** Named class, force-loaded in init: this runs on the quit path, which
+     * may execute after jadx has closed the plugin classloader — a lazily
+     * loaded lambda class would die in NoClassDefFoundError there. */
+    private inner class DetachRun(
+        private val latch: java.util.concurrent.CountDownLatch,
+    ) : Runnable {
+        override fun run() {
+            try {
+                doDetach()
+            } finally {
+                latch.countDown()
+            }
+        }
+    }
+
+    init {
+        DetachRun::class.java // preload while the classloader is open
+    }
+
     /**
      * Blocking detach for teardown paths off the EDT (shutdown hook): the
      * browser must be OUT of the hierarchy before CefBrowser.close(), or
      * AWT keeps updating the dying native view (util_mac::UpdateView crash).
-     * Bounded wait — at shutdown the EDT may already be gone.
+     * Bounded wait — at shutdown the EDT may already be gone. No lambdas,
+     * no runCatching: nothing here may trigger a class load at quit time.
      */
     fun detachBrowserNow() {
         if (SwingUtilities.isEventDispatchThread()) {
@@ -102,14 +122,11 @@ class SlidesPanel(
             return
         }
         val latch = java.util.concurrent.CountDownLatch(1)
-        SwingUtilities.invokeLater {
-            try {
-                doDetach()
-            } finally {
-                latch.countDown()
-            }
+        SwingUtilities.invokeLater(DetachRun(latch))
+        try {
+            latch.await(1, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
         }
-        runCatching { latch.await(1, java.util.concurrent.TimeUnit.SECONDS) }
     }
 
     private fun doDetach() {

@@ -46,6 +46,28 @@ class SlidesPlugin : JadxPlugin {
 object Slides {
     private val log = LoggerFactory.getLogger(Slides::class.java)
 
+    init {
+        // jadx closes the plugin classloader during quit (closeAll), and the
+        // quit path may be the FIRST execution of some code: any class that
+        // would load lazily there dies in NoClassDefFoundError. Load the
+        // kotlin.Result failure machinery (used by every runCatching catch
+        // path) and the quit-path task classes now, while loading works.
+        runCatching { throw IllegalStateException("warm ResultKt") }
+        CloseTask::class.java
+    }
+
+    /** Named task instead of a lambda: quit-path classes must never load
+     * lazily (see the init block). */
+    private class CloseTask(private val s: DeckSession) : Runnable {
+        override fun run() {
+            try {
+                s.close()
+            } catch (t: Throwable) {
+                log.warn("session close failed", t)
+            }
+        }
+    }
+
     @Volatile var ctx: JadxPluginContext? = null
     @Volatile var gui: JadxGuiContext? = null
     @Volatile var session: DeckSession? = null
@@ -55,6 +77,7 @@ object Slides {
     private var cefClient: CefClient? = null
     private var cefBrowser: CefBrowser? = null
     private var lastDir: File? = null
+    @Volatile private var lastOpened: File? = null // for Reload after a cancelled quit
     private var macOpensWarned = false
     private var docked = false // EDT-only
     private var movingPanel = false // tab close caused by dock toggle, not the user
@@ -152,7 +175,13 @@ object Slides {
 
     private fun closeSessionAsync(s: DeckSession?) {
         if (s == null) return
-        runCatching { closer.execute { runCatching { s.close() } } }
+        try {
+            closer.execute(CloseTask(s))
+        } catch (t: Throwable) {
+            // executor already drained by quit — close inline as last resort
+            log.warn("close task rejected, closing inline", t)
+            CloseTask(s).run()
+        }
     }
 
     fun closeAction() {
@@ -202,6 +231,7 @@ object Slides {
      * opens (or a close racing an open) can't leak the prepared session. */
     private fun openDeck(file: File) {
         val gen = openGen.incrementAndGet()
+        lastOpened = file
         try {
             val text = file.readText(Charsets.UTF_8).removePrefix("﻿")
             val engine = Engines.detect(file.toPath(), text)
@@ -357,51 +387,87 @@ object Slides {
     private fun installCefCleanup(mw: MainWindow) {
         if (cefCleanupInstalled) return
         cefCleanupInstalled = true
+        // created here, while the classloader is open, and reused by both
+        // hooks — a lambda allocated inside windowClosed would need a class
+        // load that can race jadx's classloader close
+        val quitTask = Runnable { quitCleanup() }
         mw.addWindowListener(object : java.awt.event.WindowAdapter() {
             override fun windowClosing(e: java.awt.event.WindowEvent) {
-                // our listener runs after jadx's (registration order), so a
-                // cancelled quit has already returned by the time we run —
-                // but we cannot distinguish cancel from proceed here, so
-                // release the view either way and let Reload restore it
-                disposeCef()
-                panel?.showStatus(
-                    "View released for shutdown.<br>" +
-                            "If you cancelled quitting, press Reload to restore the deck.",
-                )
+                // window-X and Cmd+Q pass here BEFORE jadx's background quit
+                // (its bg thread blocks on the EDT we're occupying), i.e.
+                // while the classloader is still open — do the real cleanup
+                // now. If the user cancelled the save prompt the window
+                // survives; Reload fully restores the deck.
+                beginQuitCleanup()
             }
 
             override fun windowClosed(e: java.awt.event.WindowEvent) {
                 // windowClosed fires on the EDT but quitCleanup blocks on
-                // process shutdown — run it on a worker the JVM waits for
-                Thread({ quitCleanup() }, "jadx-slides-quit").start()
+                // process shutdown — run it on a worker the JVM waits for.
+                // This (plus the shutdown hook) also covers jadx's Exit menu,
+                // which quits WITHOUT ever firing windowClosing.
+                Thread(quitTask, "jadx-slides-quit").start()
             }
         })
-        Runtime.getRuntime().addShutdownHook(Thread({ quitCleanup() }, "jadx-slides-cef-cleanup"))
+        Runtime.getRuntime().addShutdownHook(Thread(quitTask, "jadx-slides-cef-cleanup"))
     }
 
-    /** Real quit (worker/shutdown-hook thread, never the EDT): kill the deck
-     * session (Slidev child process, temp files) and tear the browser down.
-     * DeckSession.close is idempotent, so overlapping hooks are safe. */
-    private fun quitCleanup() {
+    /** EDT, windowClosing — the classloader is guaranteed open here. Kill
+     * the browser (must precede dispose(): util_mac::UpdateView crash) and
+     * kick the session close so all its classes load now. */
+    private fun beginQuitCleanup() {
         openGen.incrementAndGet()
         val s = session
         session = null
         closeSessionAsync(s)
-        // drain the close worker so a JVM exit can't strand a Slidev child
-        closer.shutdown()
-        runCatching { closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS) }
         disposeCef()
+        panel?.showStatus(
+            "View released for shutdown.<br>" +
+                    "If you cancelled quitting, press Reload to restore the deck.",
+        )
+    }
+
+    /** Real quit (worker/shutdown-hook thread, never the EDT): drain the
+     * close worker so a JVM exit can't strand a Slidev child, then tear the
+     * browser down if windowClosing didn't run (jadx's Exit menu path).
+     * Everything here is idempotent and free of lazy class loads. */
+    private fun quitCleanup() {
+        try {
+            openGen.incrementAndGet()
+            val s = session
+            session = null
+            closeSessionAsync(s)
+            closer.shutdown()
+            try {
+                closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+            }
+            disposeCef()
+        } catch (t: Throwable) {
+            log.error("quit cleanup failed", t)
+        }
     }
 
     @Synchronized // shutdown hook and EDT can race here
     private fun disposeCef() {
+        if (cefBrowser == null && cefClient == null) {
+            return // already torn down — avoid late-shutdown work entirely
+        }
         // detach first — synchronously, even from the shutdown hook: a
         // still-parented browser keeps receiving AWT UI updates and crashes
         // in util_mac::UpdateView during teardown
         panel?.detachBrowserNow()
-        runCatching { cefBrowser?.close(true) }
+        try {
+            cefBrowser?.close(true)
+        } catch (t: Throwable) {
+            log.debug("browser close failed", t)
+        }
         cefBrowser = null
-        runCatching { cefClient?.dispose() }
+        try {
+            cefClient?.dispose()
+        } catch (t: Throwable) {
+            log.debug("client dispose failed", t)
+        }
         cefClient = null
         browserHasKeyboard = false
     }
@@ -423,14 +489,19 @@ object Slides {
     }
 
     private fun reloadView() {
-        // EDT-safe: a session exists, so the bridge is already started and
-        // bumpVersion is just an atomic increment
-        val s = session ?: return
+        val s = session
+        if (s == null) {
+            // a cancelled quit tore the session down — fully reopen the deck
+            val f = lastOpened ?: return
+            Thread({ openDeck(f) }, "jadx-slides-open").apply { isDaemon = true }.start()
+            return
+        }
         if (cefBrowser == null) {
-            // the view was released (cancelled quit) — rebuild the browser
+            // the view was released but the session survived — just rebuild
             showView(s)
             return
         }
+        // EDT-safe: bumpVersion is just an atomic increment
         bridge.bumpVersion()
         if (s.engine == Engine.SLIDEV) cefBrowser?.loadURL(s.url) else cefBrowser?.reload()
     }
