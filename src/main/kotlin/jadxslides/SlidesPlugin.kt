@@ -317,6 +317,11 @@ object Slides {
 
         val existing = cefBrowser
         if (existing != null) {
+            if (p.browserComponent == null) {
+                // detached by a cancelled quit — the browser is still alive
+                // (quit never destroys it), just reparent it
+                p.attachBrowser(existing.uiComponent)
+            }
             existing.loadURL(s.url)
             p.focusSoon()
             return
@@ -416,14 +421,15 @@ object Slides {
     }
 
     /**
-     * Close the browser before CEF's native teardown. jadx's quit flow is
-     * windowClosing → (cancelable save prompt) → background thread →
-     * dispose() → System.exit(0): a browser still parented at dispose/exit
-     * time gets AWT UI updates against a dying native view and crashes in
-     * util_mac::UpdateView. So the browser dies at windowClosing — BEFORE
-     * dispose — which is the empirically crash-free ordering. If the user
-     * cancels the save prompt the window survives with the view released;
-     * the panel says so and the Reload button rebuilds the browser.
+     * Quit lifecycle. jadx's quit flow is windowClosing → (cancelable save
+     * prompt) → background thread → closeAll() (plugin classloader closes!)
+     * → dispose() → System.exit(0). Our rules, each learned from a distinct
+     * native crash:
+     *  - detach the browser at windowClosing, BEFORE dispose()
+     *  - destroy NOTHING of CEF at quit (see detachCefForQuit)
+     *  - no lazy class loads anywhere on the quit path
+     * If the user cancels the save prompt the window survives with the view
+     * released; Reload reattaches the still-alive browser.
      */
     private fun installCefCleanup(mw: MainWindow) {
         if (cefCleanupInstalled) return
@@ -467,11 +473,26 @@ object Slides {
         closeSessionAsync(s)
         closeSessionAsync(pendingSession) // an open still in flight
         pendingSession = null
-        disposeCef()
+        detachCefForQuit()
         panel?.showStatus(
             "View released for shutdown.<br>" +
                     "If you cancelled quitting, press Reload to restore the deck.",
         )
+    }
+
+    /**
+     * Quit-path CEF handling: DETACH ONLY, destroy nothing. Every macOS
+     * quit crash so far was a live JCEF observer touching partially
+     * destroyed state — a browser closed too early (CefHandler
+     * setVisibility), a browser still parented at dispose
+     * (util_mac::UpdateView), or a torn-down context (TempWindowMac,
+     * JCEFApplication's event monitor). Keeping browser/client/context
+     * fully alive but unparented until the process dies leaves the
+     * observers nothing dangling to dereference; the OS reclaims it all.
+     */
+    private fun detachCefForQuit() {
+        panel?.detachBrowserNow()
+        browserHasKeyboard = false
     }
 
     /** Real quit (worker/shutdown-hook thread, never the EDT): drain the
@@ -492,7 +513,7 @@ object Slides {
                 closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)
             } catch (_: InterruptedException) {
             }
-            disposeCef()
+            detachCefForQuit()
         } catch (t: Throwable) {
             log.error("quit cleanup failed", t)
         }
@@ -516,14 +537,16 @@ object Slides {
         }
     }
 
-    @Synchronized // shutdown hook and EDT can race here
+    /** Full disposal — mid-run failure cleanup ONLY (a half-built client
+     * whose createBrowser threw). Never called on the quit path: quit must
+     * not destroy CEF objects (detachCefForQuit explains why). */
+    @Synchronized
     private fun disposeCef() {
         if (cefBrowser == null && cefClient == null) {
-            return // already torn down — avoid late-shutdown work entirely
+            return
         }
-        // detach first — synchronously, even from the shutdown hook: a
-        // still-parented browser keeps receiving AWT UI updates and crashes
-        // in util_mac::UpdateView during teardown
+        // detach first: a still-parented browser keeps receiving AWT UI
+        // updates against a dying native view (util_mac::UpdateView)
         panel?.detachBrowserNow()
         try {
             cefBrowser?.close(true)
@@ -544,7 +567,7 @@ object Slides {
      * browser, then hand the quit to jadx's normal window-close flow. */
     fun requestQuit() {
         SwingUtilities.invokeLater {
-            disposeCef()
+            detachCefForQuit()
             val mw = mainWindow()
             if (mw != null) {
                 mw.dispatchEvent(
