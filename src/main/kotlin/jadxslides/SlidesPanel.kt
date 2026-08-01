@@ -29,6 +29,7 @@ class SlidesPanel(
     private val content = JPanel(BorderLayout())
     private val dockToggle = JButton("Dock")
 
+    @Volatile
     var browserComponent: Component? = null
         private set
 
@@ -102,9 +103,11 @@ class SlidesPanel(
         }
     }
 
-    init {
-        DetachRun::class.java // preload while the classloader is open
-    }
+    // preload while the classloader is open: as a FIELD initializer — the
+    // compiler dropped a bare `DetachRun::class.java` statement as an unused
+    // pure expression, and the class then failed to load at quit time
+    @Suppress("unused")
+    private val detachRunPreload: Class<*> = DetachRun::class.java
 
     /**
      * Blocking detach for teardown paths off the EDT (shutdown hook): the
@@ -114,6 +117,9 @@ class SlidesPanel(
      * no runCatching: nothing here may trigger a class load at quit time.
      */
     fun detachBrowserNow() {
+        if (browserComponent == null) {
+            return // already detached (windowClosing ran first) — nothing to do
+        }
         if (SwingUtilities.isEventDispatchThread()) {
             doDetach()
             return

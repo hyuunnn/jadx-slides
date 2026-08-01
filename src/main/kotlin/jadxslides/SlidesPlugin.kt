@@ -53,8 +53,13 @@ object Slides {
         // kotlin.Result failure machinery (used by every runCatching catch
         // path) and the quit-path task classes now, while loading works.
         runCatching { throw IllegalStateException("warm ResultKt") }
-        CloseTask::class.java
     }
+
+    // field initializer, not a bare statement — the compiler drops unused
+    // pure expressions and the preload silently vanishes (seen with
+    // SlidesPanel.DetachRun)
+    @Suppress("unused")
+    private val closeTaskPreload: Class<*> = CloseTask::class.java
 
     /** Named task instead of a lambda: quit-path classes must never load
      * lazily (see the init block). */
