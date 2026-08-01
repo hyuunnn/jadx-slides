@@ -345,19 +345,31 @@ object Slides {
     }
 
     /**
-     * Close the browser before CEF's native teardown: JCEF on macOS is known
-     * to crash in TempWindowMac::~TempWindowMac at quit when browsers are
-     * still alive (harmless — jadx has already saved — but ugly).
+     * Close the browser before CEF's native teardown. jadx's quit flow is
+     * windowClosing → (cancelable save prompt) → background thread →
+     * dispose() → System.exit(0): a browser still parented at dispose/exit
+     * time gets AWT UI updates against a dying native view and crashes in
+     * util_mac::UpdateView. So the browser dies at windowClosing — BEFORE
+     * dispose — which is the empirically crash-free ordering. If the user
+     * cancels the save prompt the window survives with the view released;
+     * the panel says so and the Reload button rebuilds the browser.
      */
     private fun installCefCleanup(mw: MainWindow) {
         if (cefCleanupInstalled) return
         cefCleanupInstalled = true
-        // windowClosing would fire BEFORE jadx decides whether to really
-        // quit (its DO_NOTHING_ON_CLOSE handler can cancel via the save
-        // prompt), which used to kill the browser under a still-open deck —
-        // only act once the window is actually gone. jadx's System.exit
-        // path never disposes the window; the shutdown hook covers it.
         mw.addWindowListener(object : java.awt.event.WindowAdapter() {
+            override fun windowClosing(e: java.awt.event.WindowEvent) {
+                // our listener runs after jadx's (registration order), so a
+                // cancelled quit has already returned by the time we run —
+                // but we cannot distinguish cancel from proceed here, so
+                // release the view either way and let Reload restore it
+                disposeCef()
+                panel?.showStatus(
+                    "View released for shutdown.<br>" +
+                            "If you cancelled quitting, press Reload to restore the deck.",
+                )
+            }
+
             override fun windowClosed(e: java.awt.event.WindowEvent) {
                 // windowClosed fires on the EDT but quitCleanup blocks on
                 // process shutdown — run it on a worker the JVM waits for
@@ -414,6 +426,11 @@ object Slides {
         // EDT-safe: a session exists, so the bridge is already started and
         // bumpVersion is just an atomic increment
         val s = session ?: return
+        if (cefBrowser == null) {
+            // the view was released (cancelled quit) — rebuild the browser
+            showView(s)
+            return
+        }
         bridge.bumpVersion()
         if (s.engine == Engine.SLIDEV) cefBrowser?.loadURL(s.url) else cefBrowser?.reload()
     }
