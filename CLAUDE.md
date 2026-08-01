@@ -1,0 +1,136 @@
+# CLAUDE.md — jadx-slides
+
+jadx port of [ida-slides](https://github.com/hyuunnn/ida-slides): Marp/Slidev
+decks rendered in an embedded Chromium (JCEF) inside a jadx-gui tab, with
+`@` tokens that jump the decompiled code view. Full battle history (4 review
+rounds, 5 native quit crashes) lives in `docs/review-log.ko.md` — read it
+before "improving" anything listed under DO NOT TOUCH below.
+
+## Build / install / verify
+
+```sh
+./gradlew shadowJar                 # the ONLY artifact; plain `jar` is disabled
+jadx plugins --uninstall jadx-slides
+jadx plugins --install-jar build/libs/jadx-slides-0.1.0.jar
+```
+
+No unit-test suite. Verification is headless smoke tests (see "Testing")
+plus running jadx-gui. Target: brew jadx **1.5.5** (`compileOnly` pins).
+
+## Architecture (1 minute)
+
+- `SlidesPlugin` registers a menu action + `Ctrl+Shift+M`. ALL long-lived
+  state lives in `object Slides` — **jadx re-instantiates plugins on every
+  project open**; `init` only swaps `ctx`/`gui` refs.
+- `BridgeServer` (NanoHTTPD, 127.0.0.1:random) serves the rendered Marp
+  html + assets, `/jump?t=<token>`, `/version` (poll-based live reload).
+  CORS `*` only on `/jump` + `/version` (Slidev's vite origin needs it).
+- `DeckPreprocess` rewrites `@` tokens at preprocess time into
+  `<a onclick="fetch('http://127.0.0.1:PORT/jump?...')">` anchors, written
+  to hidden siblings `.<name>.jadx-slides.md/.html` next to the deck.
+- `Engines`: Marp = one-shot `marp --html` per save (WatchService+debounce);
+  Slidev = dev server, port parsed from its OWN banner (ANSI-stripped).
+- `JumpService` resolves FQN / smali / short names (orig + renamed alias)
+  via jadx-gui internals; resolution OFF the EDT, UI jump ON it.
+- View: custom `SlidesNode(JNode)`/`SlidesContentPanel` opened through
+  `TabsController.selectTab` (semi-sanctioned pattern; unknown node types
+  are skipped by tab persistence — the tab just isn't restored). Opt-in
+  **Dock** button reparents jadx's TabbedPane into a JSplitPane
+  (`DockManager`); Tab reverses it.
+
+## DO NOT TOUCH — each rule cost a native crash to learn
+
+Quit flow of jadx: `windowClosing → cancelable save prompt → bg thread →
+closeAll() (CLOSES THE PLUGIN CLASSLOADER) → dispose() → System.exit(0)`.
+File→Exit menu skips windowClosing entirely; Cmd+Q is intercepted by CEF
+and routed through `Slides.requestQuit`.
+
+1. **Quit destroys NOTHING of CEF.** Detach the browser from the Swing
+   hierarchy (`detachCefForQuit`) and leave browser/client/context alive
+   until the process dies. Every macOS quit crash (TempWindowMac,
+   util_mac::UpdateView, JCEFApplication event monitor, CefHandler
+   setVisibility) was a live JCEF observer touching partially destroyed
+   state. `disposeCef` exists ONLY for the mid-run createBrowser-failure
+   path. `neutralizeCefShutdown()` marks CefApp TERMINATED so jcefmaven's
+   shutdown hook no-ops.
+2. **Detach at `windowClosing`** (before dispose). Cancel case: panel shows
+   a hint; Reload reattaches the still-alive browser.
+3. **No lazy class loads on the quit path.** jadx closes the plugin
+   classloader mid-quit. Quit code uses named classes (`CloseTask`,
+   `DetachRun`) + plain try/catch (no lambdas, no `runCatching` — its
+   failure branch loads `ResultKt`). Preloads MUST be **field
+   initializers** — the Kotlin compiler deletes a bare `X::class.java`
+   statement as an unused pure expression (verify with
+   `javap -c | grep <Class>` that the ldc survived). `Slides.init` warms
+   ResultKt by actually throwing once.
+4. **CefApp is built once and never disposed** (CEF cannot re-init in one
+   JVM). Natives cache in `~/.cache/jadx-slides/jcef`.
+
+## Non-obvious constraints & tradeoffs
+
+- **Shadow relocation**: `kotlin` → `jadxslides.shadow.kotlin` (jadx's fat
+  jar ships an older stdlib on the PARENT classloader — parent-first would
+  break us), `fi.iki.elonen` likewise. **Never relocate `org.cef` /
+  `me.friwi`** — JNI registers natives by class name.
+- `compileOnly` jadx-core/jadx-gui do NOT bring slf4j/rsyntaxtextarea
+  transitively — they're separate `compileOnly` entries.
+- jadx-gui internals are reachable because the plugin classloader's parent
+  is the app classloader. Used: `MainWindow.getTabbedPane/getTabsController/
+  getCacheObject`, `TabsController.codeJump`, `JNodeCache.makeFrom`,
+  `AbstractCodeContentPanel.getCodeArea`. Compiled against 1.5.5 — a jadx
+  bump needs these re-checked.
+- **macOS needs** `JADX_GUI_OPTS="--add-opens=java.desktop/sun.awt=ALL-UNNAMED
+  --add-opens=java.desktop/sun.lwawt=ALL-UNNAMED
+  --add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED"` for JCEF.
+  `CefHolder.macOpensMissing()` checks first and falls back to the system
+  browser (jump links work identically there — the bridge is the feature,
+  the embedded view is presentation).
+- **Rejected alternatives** (don't re-explore): JavaFX WebView (absent from
+  jadx's JRE, old WebKit breaks Slidev), webview_java (Swing embedding
+  crashes on macOS ARM — github.com/webview/webview_java/issues/37),
+  injecting a pane into the per-class Code/Smali/Simple/Fallback bottom
+  tabs (per-class panels × single-parent Swing × 1.5.6-only lazy split =
+  strictly worse than DockManager), JxBrowser (commercial).
+- **Keyboard**: macOS delivers keys to BOTH the native browser and the AWT
+  focus owner. A global KeyEventDispatcher swallows nav keys while
+  `browserHasKeyboard` (set by the CEF focus handler, which also clears the
+  AWT focus owner). Guards: open menus and a non-showing deck are never
+  swallowed. After an `@` jump, the code area legitimately owns the keys.
+- **Slidev**: Node ≥17 binds "localhost" to ::1 only → probe BOTH stacks;
+  trust the banner's port (vite silently auto-increments on conflict).
+  Child processes are killed as a TREE (Windows `.cmd` shim would orphan
+  node otherwise); `.cmd`/`.bat` must be spawned via `cmd.exe /c`.
+- **Sessions**: reopening the SAME deck derives identical sibling paths —
+  bridge handover is owner-identity-based (`publishDeck`/`clearDeck`) and
+  file deletes check for a successor (`deleteSiblingsUnlessReused`).
+  Publishing happens on the EDT under the `openGen` generation check;
+  `pendingSession` covers quit-during-open.
+- Harmless macOS terminal noise (`Exception in thread "AppKit Thread"`,
+  signature -67030) is native-level and cannot be suppressed from the
+  plugin — documented in the READMEs; don't chase it.
+
+## Testing (headless, no GUI)
+
+Scratch harness pattern used throughout (see git history / review log):
+- ServiceLoader smoke: run a main with
+  `-cp jadx-1.5.5-all.jar:build/libs/jadx-slides-0.1.0.jar`, iterate
+  `ServiceLoader.load(JadxPlugin.class)` — plugin must appear.
+- Preprocessor: call `DeckPreprocess.INSTANCE.rewrite(md, port)` from Java;
+  regression cases: token in backticks/fences stays plain, `` `<style>` ``
+  *mention* must NOT latch raw-HTML mode, `assets/@logo.png` untouched,
+  email `@` untouched, trailing-dot FQN not swallowed.
+- Slidev E2E: call `Engines.INSTANCE.startSlidev(deck)` from Java (import
+  `jadxslides.shadow.kotlin.Pair` — relocation!), curl the returned URL
+  (Java HttpClient hangs on ::1 — use curl), then `stop()` and
+  `pgrep slidev` to confirm the tree died.
+- Quit-path changes: additionally `javap -c` the built classes to confirm
+  preload ldc instructions survived (see DO NOT TOUCH #3).
+
+## Scope policy
+
+The user builds this for their own presentations and explicitly prefers
+minimal scope: don't add features a human can do by eye (deck lint was
+cut for this reason), don't apply cosmetic refactors proactively. Roadmap
+items the user has kept: `@name[1:8]` embeds, hover preview of decompiled
+code, "Copy @reference" context action. Windows/Linux are code-reviewed
+but never run — test there before claiming support.
