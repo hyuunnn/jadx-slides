@@ -57,6 +57,25 @@ Without them (or if JCEF fails for any reason) the deck opens in the system
 browser instead — jump links still work there. On first use JCEF downloads
 ~100MB of natives into `~/.cache/jadx-slides/jcef` (one time).
 
+**Harmless log noise on macOS**: when jadx-gui is launched from a terminal,
+JCEF prints repeated `Exception in thread "AppKit Thread"` fragments and a
+`Signature validation ... failed (-67030)` error. Both come from running the
+unsigned CEF framework and are emitted natively (below the Java logging
+layer), so the plugin cannot suppress them. They are cosmetic. To hide them,
+either launch detached:
+
+```sh
+jadx-gui > /dev/null 2>&1 &
+```
+
+or filter just that phrase while keeping real logs (zsh, `~/.zshrc`):
+
+```sh
+jadx-gui() {
+  command jadx-gui "$@" 2> >(sed -l 's/Exception in thread "AppKit Thread" //g' >&2)
+}
+```
+
 ## `@` reference syntax
 
 | Syntax | In a slide it becomes… |

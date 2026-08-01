@@ -55,6 +55,25 @@ JADX_GUI_OPTS="--add-opens=java.desktop/sun.awt=ALL-UNNAMED --add-opens=java.des
 링크는 거기서도 동작합니다. 최초 사용 시 JCEF 네이티브(~100MB)를
 `~/.cache/jadx-slides/jcef`에 한 번 다운로드합니다.
 
+**macOS의 무해한 로그 소음**: 터미널에서 jadx-gui를 실행하면 JCEF가
+`Exception in thread "AppKit Thread"` 문구와
+`Signature validation ... failed (-67030)` 에러를 반복해서 찍습니다. 둘 다
+서명되지 않은 CEF 프레임워크 실행에서 나오는 것으로, 자바 로깅 계층
+아래(네이티브)에서 출력되기 때문에 플러그인이 억제할 수 없습니다. 기능에는
+영향이 없습니다. 숨기려면 분리 실행하거나:
+
+```sh
+jadx-gui > /dev/null 2>&1 &
+```
+
+해당 문구만 걸러내면 됩니다 (zsh, `~/.zshrc`):
+
+```sh
+jadx-gui() {
+  command jadx-gui "$@" 2> >(sed -l 's/Exception in thread "AppKit Thread" //g' >&2)
+}
+```
+
 ## `@` 참조 문법
 
 | 문법 | 슬라이드에서는… |
