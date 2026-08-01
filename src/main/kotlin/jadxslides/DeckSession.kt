@@ -46,22 +46,19 @@ class DeckSession(val source: File, val engine: Engine) {
         prepared.writeText(DeckPreprocess.rewrite(readSource(), bridgePort))
     }
 
-    /** Full pipeline for the engine; returns an error message or null. */
+    /** Full pipeline for the engine; returns an error message or null.
+     * Deliberately does NOT touch the bridge's serving state — a slow
+     * prepare losing the open race must not overwrite the winner's deck.
+     * The winner publishes via [publishTo] on the EDT under the gen check. */
     fun prepare(bridge: BridgeServer): String? {
         bridgeRef = bridge
         when (engine) {
             Engine.HTML -> {
-                bridge.deckHtml = source
-                bridge.deckDir = dir
-                bridge.deckOwner = this
                 url = "http://127.0.0.1:${bridge.port}/"
             }
             Engine.MARP -> {
                 preprocess(bridge.port)
                 Engines.renderMarp(prepared.toPath(), htmlOut.toPath())?.let { return it }
-                bridge.deckHtml = htmlOut
-                bridge.deckDir = dir
-                bridge.deckOwner = this
                 url = "http://127.0.0.1:${bridge.port}/"
             }
             Engine.SLIDEV -> {
@@ -74,6 +71,15 @@ class DeckSession(val source: File, val engine: Engine) {
         }
         startWatcher(bridge)
         return null
+    }
+
+    /** Called only for the session that won the open race. */
+    fun publishTo(bridge: BridgeServer) {
+        when (engine) {
+            Engine.HTML -> bridge.publishDeck(this, source, dir)
+            Engine.MARP -> bridge.publishDeck(this, htmlOut, dir)
+            Engine.SLIDEV -> {} // vite serves the deck itself
+        }
     }
 
     private fun startWatcher(bridge: BridgeServer) {
@@ -163,16 +169,9 @@ class DeckSession(val source: File, val engine: Engine) {
         runCatching { watchService?.close() }
         slidev?.let { runCatching { it.stop() } }
         slidev = null
-        bridgeRef?.let {
-            // stop serving the closed deck — unless a newer session already
-            // took the bridge over (identity check: paths collide when the
-            // same deck is reopened)
-            if (it.deckOwner === this) {
-                it.deckHtml = null
-                it.deckDir = null
-                it.deckOwner = null
-            }
-        }
+        // stop serving the closed deck — unless a newer session already took
+        // the bridge over (owner identity, checked atomically in clearDeck)
+        bridgeRef?.clearDeck(this)
         if (engine != Engine.HTML) {
             deleteSiblingsUnlessReused()
         }

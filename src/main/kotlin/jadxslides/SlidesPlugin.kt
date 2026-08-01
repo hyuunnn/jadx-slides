@@ -72,10 +72,16 @@ object Slides {
     @Volatile var gui: JadxGuiContext? = null
     @Volatile var session: DeckSession? = null
 
-    private var panel: SlidesPanel? = null // EDT-only
-    private var node: SlidesNode? = null
-    private var cefClient: CefClient? = null
-    private var cefBrowser: CefBrowser? = null
+    // written on the EDT but read by the quit worker / shutdown hook —
+    // without volatile the teardown can see stale nulls and skip disposal
+    @Volatile private var panel: SlidesPanel? = null
+    private var node: SlidesNode? = null // EDT-only
+    @Volatile private var cefClient: CefClient? = null
+    @Volatile private var cefBrowser: CefBrowser? = null
+
+    /** A session being prepared on the open thread; quit must close it too —
+     * it is in nobody else's queue until the EDT publish step runs. */
+    @Volatile private var pendingSession: DeckSession? = null
     private var lastDir: File? = null
     @Volatile private var lastOpened: File? = null // for Reload after a cancelled quit
     private var macOpensWarned = false
@@ -112,7 +118,16 @@ object Slides {
         if (keyGuardInstalled) return
         keyGuardInstalled = true
         val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
-        kfm.addKeyEventDispatcher { e -> browserHasKeyboard && e.keyCode in NAV_KEYS }
+        kfm.addKeyEventDispatcher { e ->
+            browserHasKeyboard &&
+                    e.keyCode in NAV_KEYS &&
+                    // clearGlobalFocusOwner leaves the owner null, so the flag
+                    // can survive interactions that never take focus (menus,
+                    // scrollbars) — never swallow keys an open menu needs,
+                    // or when the deck isn't even visible
+                    panel?.browserComponent?.isShowing == true &&
+                    javax.swing.MenuSelectionManager.defaultManager().selectedPath.isEmpty()
+        }
         kfm.addPropertyChangeListener("focusOwner") { ev ->
             val owner = ev.newValue as? java.awt.Component
             if (owner != null && owner !== panel?.browserComponent) {
@@ -232,36 +247,59 @@ object Slides {
     private fun openDeck(file: File) {
         val gen = openGen.incrementAndGet()
         lastOpened = file
+        var s: DeckSession? = null
         try {
             val text = file.readText(Charsets.UTF_8).removePrefix("﻿")
             val engine = Engines.detect(file.toPath(), text)
-            val s = DeckSession(file, engine)
-            val err = s.prepare(bridge)
+            val session0 = DeckSession(file, engine)
+            s = session0
+            pendingSession = session0
+            val err = session0.prepare(bridge)
             if (err != null) {
-                closeSessionAsync(s)
+                clearPending(session0)
+                closeSessionAsync(session0)
                 showError(err)
                 return
             }
             SwingUtilities.invokeLater {
+                clearPending(session0)
                 if (gen != openGen.get()) {
                     // a newer open or a close superseded this one
-                    closeSessionAsync(s)
+                    closeSessionAsync(session0)
                     return@invokeLater
                 }
                 val old = session
-                session = s
+                session = session0
+                // the winner takes over the bridge here, under the gen
+                // check — a slower losing prepare can no longer clobber it
+                session0.publishTo(bridge)
                 closeSessionAsync(old)
-                showView(s)
+                showView(session0)
             }
         } catch (t: Throwable) {
             log.error("failed to open deck {}", file, t)
+            // a session created before the throw holds a scheduler thread
+            // and possibly sibling files — don't leak them
+            s?.let { clearPending(it) }
+            closeSessionAsync(s)
             showError("Failed to open the deck: ${t.message}")
         }
+    }
+
+    /** Clear pendingSession only if it is still ours — a newer open may
+     * already have replaced it with its own in-flight session. */
+    @Synchronized
+    private fun clearPending(mine: DeckSession) {
+        if (pendingSession === mine) pendingSession = null
     }
 
     /** EDT: open/select the slides tab and attach (or navigate) the browser. */
     private fun showView(s: DeckSession) {
         val mw = mainWindow() ?: return
+        // quit cleanup must exist for EVERY deck, including the
+        // browser-fallback paths — a Slidev child must never outlive jadx
+        // just because the embedded browser was unavailable
+        installCefCleanup(mw)
         val p = panelOrCreate()
         p.setDeckName(s.source.name)
         if (p.browserComponent == null) p.showStatus("Preparing view…")
@@ -305,6 +343,10 @@ object Slides {
                             return@invokeLater
                         }
                         val client = app.createClient()
+                        // owned by disposeCef from this moment — assigning
+                        // only after createBrowser leaked the client (and its
+                        // focus handler) whenever createBrowser threw
+                        cefClient = client
                         // keys reach both the native browser and whichever
                         // Swing component holds the AWT focus (the code area
                         // — so arrow keys moved slides AND code); park the
@@ -325,13 +367,12 @@ object Slides {
                         installKeyGuard()
                         // always the CURRENT session's url — s may be stale
                         val browser = client.createBrowser(cur.url, false, false)
-                        cefClient = client
                         cefBrowser = browser
-                        installCefCleanup(mw)
                         p.attachBrowser(browser.uiComponent)
                         p.focusSoon()
                     } catch (t: Throwable) {
                         log.error("JCEF browser creation failed — falling back to the system browser", t)
+                        disposeCef() // release the half-built client/browser
                         p.showStatus(
                             "Embedded browser unavailable (${t.message})<br>" +
                                     "The deck was opened in the system browser instead.",
@@ -424,6 +465,8 @@ object Slides {
         val s = session
         session = null
         closeSessionAsync(s)
+        closeSessionAsync(pendingSession) // an open still in flight
+        pendingSession = null
         disposeCef()
         panel?.showStatus(
             "View released for shutdown.<br>" +
@@ -442,6 +485,8 @@ object Slides {
             val s = session
             session = null
             closeSessionAsync(s)
+            closeSessionAsync(pendingSession) // an open still in flight
+            pendingSession = null
             closer.shutdown()
             try {
                 closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS)

@@ -21,8 +21,6 @@ object DockManager {
     private var split: JSplitPane? = null
     private var restore: (() -> Unit)? = null
 
-    val isDocked: Boolean get() = split != null
-
     fun dock(mw: MainWindow, panel: JComponent): Boolean {
         if (split != null) return true
         val tabbed = mw.tabbedPane

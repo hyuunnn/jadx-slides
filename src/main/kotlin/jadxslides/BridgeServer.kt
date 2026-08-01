@@ -37,10 +37,31 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
 
     /** Marp html to serve at `/` and the dir static assets resolve against.
      * deckOwner identifies which session set them — File equality is
-     * path-based, so reopening the same deck needs an identity check. */
+     * path-based, so reopening the same deck needs an identity check.
+     * Mutation goes through publishDeck/clearDeck so a slow superseded
+     * open can neither mis-pair the fields nor blank a newer session. */
     @Volatile var deckHtml: File? = null
+        private set
     @Volatile var deckDir: File? = null
+        private set
     @Volatile var deckOwner: Any? = null
+        private set
+
+    @Synchronized
+    fun publishDeck(owner: Any, html: File?, dir: File?) {
+        deckOwner = owner
+        deckHtml = html
+        deckDir = dir
+    }
+
+    @Synchronized
+    fun clearDeck(owner: Any) {
+        if (deckOwner === owner) {
+            deckOwner = null
+            deckHtml = null
+            deckDir = null
+        }
+    }
 
     private val pendingJump = java.util.concurrent.atomic.AtomicReference<String?>()
     private val jumpExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->

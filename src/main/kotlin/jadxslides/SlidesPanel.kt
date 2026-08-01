@@ -87,9 +87,6 @@ class SlidesPanel(
         content.repaint()
     }
 
-    /** Remove the browser from the hierarchy so AWT stops sending it UI updates. */
-    fun detachBrowser() = onEdt { doDetach() }
-
     /** Named class, force-loaded in init: this runs on the quit path, which
      * may execute after jadx has closed the plugin classloader — a lazily
      * loaded lambda class would die in NoClassDefFoundError there. */

@@ -13,6 +13,9 @@ enum class Engine { MARP, SLIDEV, HTML }
 object Engines {
     private val LOG = LoggerFactory.getLogger(Engines::class.java)
 
+    private val ANSI_RE = Regex("\u001B\\[[0-9;]*m")
+    private val SLIDEV_URL_RE = Regex("https?://[A-Za-z0-9.\\-]+:(\\d+)/")
+
     private val SLIDEV_FM_KEYS = setOf(
         "transition", "mdc", "drawings", "highlighter", "monaco", "colorSchema",
         "routerMode", "canvasWidth", "aspectRatio", "fonts", "addons",
@@ -71,7 +74,7 @@ object Engines {
             }, "jadx-slides-marp-log").apply { isDaemon = true }
             drain.start()
             if (!p.waitFor(90, TimeUnit.SECONDS)) {
-                p.destroyForcibly()
+                killTreeForcibly(p)
                 return "marp timed out"
             }
             drain.join(2_000)
@@ -81,7 +84,7 @@ object Engines {
             } else null
         } catch (e: InterruptedException) {
             // session closed mid-render: don't let the child outlive us
-            proc?.destroyForcibly()
+            proc?.let { killTreeForcibly(it) }
             Thread.currentThread().interrupt()
             "marp render interrupted"
         } catch (e: Exception) {
@@ -97,14 +100,32 @@ object Engines {
         false
     }
 
+    /**
+     * Kill a spawned CLI and its whole process tree: on Windows the Process
+     * is the cmd.exe shim and destroying only it orphans the node child
+     * actually running vite/marp.
+     */
+    private fun killTree(process: Process) {
+        process.toHandle().descendants().forEach { it.destroy() }
+        process.destroy()
+        if (!process.waitFor(3, TimeUnit.SECONDS)) {
+            process.toHandle().descendants().forEach { it.destroyForcibly() }
+            process.destroyForcibly()
+        }
+    }
+
+    private fun killTreeForcibly(process: Process) {
+        process.toHandle().descendants().forEach { it.destroyForcibly() }
+        process.destroyForcibly()
+    }
+
     /** A running slidev dev server bound to a local port. */
     class SlidevServer(private val process: Process, val port: Int, host: String) {
         // vite may listen on one stack only (Node ≥17 binds "localhost" to
         // ::1); point at the address that actually answered
         val url: String = if (host.contains(':')) "http://[$host]:$port/" else "http://$host:$port/"
         fun stop() {
-            process.destroy()
-            if (!process.waitFor(3, TimeUnit.SECONDS)) process.destroyForcibly()
+            killTree(process)
         }
     }
 
@@ -124,14 +145,15 @@ object Engines {
             pb.redirectErrorStream(true)
             val proc = pb.start()
             // drain output so the child never blocks on a full pipe; keep a
-            // tail so startup failures carry a real reason
+            // tail so startup failures carry a real reason and the banner
+            // (with the authoritative URL) stays parseable
             val tail = ArrayDeque<String>()
             Thread {
                 proc.inputStream.bufferedReader().forEachLine {
                     LOG.debug("slidev: {}", it)
                     synchronized(tail) {
                         tail.addLast(it)
-                        if (tail.size > 15) tail.removeFirst()
+                        if (tail.size > 40) tail.removeFirst()
                     }
                 }
             }.apply { isDaemon = true; name = "jadx-slides-slidev-log" }.start()
@@ -140,19 +162,34 @@ object Engines {
                 tail.filter { it.isNotBlank() }.takeLast(4).joinToString("\n")
             }
 
+            // vite silently auto-increments when the requested port is taken
+            // (a TOCTOU against our ServerSocket probe), so trust the port
+            // slidev itself prints over the one we asked for. The banner is
+            // ANSI-colored — strip escapes before matching.
+            fun bannerPort(): Int? = synchronized(tail) {
+                tail.firstNotNullOfOrNull { line ->
+                    ANSI_RE.replace(line, "")
+                        .let { SLIDEV_URL_RE.find(it) }
+                        ?.groupValues?.get(1)?.toIntOrNull()
+                }
+            }
+
             val deadline = System.currentTimeMillis() + 60_000
             while (System.currentTimeMillis() < deadline) {
                 if (!proc.isAlive) {
                     return null to "slidev exited early:\n${lastOutput()}"
                 }
-                // Node ≥17 may bind "localhost" to ::1 only — probe both stacks
-                val host = listOf("127.0.0.1", "::1").firstOrNull { portOpen(it, port) }
-                if (host != null) {
-                    return SlidevServer(proc, port, host) to null
+                val actualPort = bannerPort()
+                if (actualPort != null) {
+                    // Node ≥17 may bind "localhost" to ::1 only — probe both
+                    val host = listOf("127.0.0.1", "::1").firstOrNull { portOpen(it, actualPort) }
+                    if (host != null) {
+                        return SlidevServer(proc, actualPort, host) to null
+                    }
                 }
                 Thread.sleep(300)
             }
-            proc.destroyForcibly()
+            killTreeForcibly(proc)
             null to "slidev did not start within 60s:\n${lastOutput()}"
         } catch (e: Exception) {
             LOG.error("slidev spawn failed", e)

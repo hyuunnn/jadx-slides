@@ -16,9 +16,10 @@ object CliDiscovery {
         val dirs = ArrayList<File>()
         System.getenv("PATH")?.split(File.pathSeparator)?.forEach { dirs.add(File(it)) }
 
-        // nvm: newest node version first
+        // nvm: newest node version first — numeric compare, a lexicographic
+        // sort would rank v9.x above v18.x
         File("$home/.nvm/versions/node").listFiles()
-            ?.sortedByDescending { it.name }
+            ?.sortedByDescending { versionScore(it.name) }
             ?.forEach { dirs.add(File(it, "bin")) }
 
         dirs.add(File("/opt/homebrew/bin"))
@@ -31,6 +32,15 @@ object CliDiscovery {
             System.getenv("APPDATA")?.let { dirs.add(File(it, "npm")) }
         }
         return dirs
+    }
+
+    /** "v18.20.0" -> 18_020_000; non-numeric parts count as 0. */
+    private fun versionScore(name: String): Long {
+        val parts = name.removePrefix("v").split('.')
+        val major = parts.getOrNull(0)?.toLongOrNull() ?: 0
+        val minor = parts.getOrNull(1)?.toLongOrNull() ?: 0
+        val patch = parts.getOrNull(2)?.toLongOrNull() ?: 0
+        return major * 1_000_000 + minor * 1_000 + patch
     }
 
     private fun executable(dir: File, tool: String): File? {
