@@ -402,6 +402,10 @@ object Slides {
             }
 
             override fun windowClosed(e: java.awt.event.WindowEvent) {
+                // definite quit, and still BEFORE jadx's System.exit (the bg
+                // thread waits for this dispose to finish) — the perfect
+                // moment to defuse CEF's native shutdown
+                neutralizeCefShutdown()
                 // windowClosed fires on the EDT but quitCleanup blocks on
                 // process shutdown — run it on a worker the JVM waits for.
                 // This (plus the shutdown hook) also covers jadx's Exit menu,
@@ -433,6 +437,7 @@ object Slides {
      * Everything here is idempotent and free of lazy class loads. */
     private fun quitCleanup() {
         try {
+            neutralizeCefShutdown() // backup for the shutdown-hook race
             openGen.incrementAndGet()
             val s = session
             session = null
@@ -445,6 +450,24 @@ object Slides {
             disposeCef()
         } catch (t: Throwable) {
             log.error("quit cleanup failed", t)
+        }
+    }
+
+    /**
+     * A full native CefShutdown on macOS crashes AFTER our cleanup: JCEF's
+     * swizzled NSApplication event monitor keeps running and dereferences
+     * state the shutdown destroyed (std::set in the JCEFApplication load
+     * block). The process is exiting anyway, so mark CefApp TERMINATED —
+     * jcefmaven's shutdown hook then no-ops instead of tearing CEF down.
+     * Definite-quit paths only: a terminated CefApp cannot be revived.
+     */
+    private fun neutralizeCefShutdown() {
+        try {
+            val f = org.cef.CefApp::class.java.getDeclaredField("state_")
+            f.isAccessible = true
+            f.set(null, org.cef.CefApp.CefAppState.TERMINATED)
+        } catch (t: Throwable) {
+            log.debug("could not neutralize CEF shutdown", t)
         }
     }
 
