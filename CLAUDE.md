@@ -74,6 +74,9 @@ and routed through `Slides.requestQuit`.
   `me.friwi`** — JNI registers natives by class name.
 - `compileOnly` jadx-core/jadx-gui do NOT bring slf4j/rsyntaxtextarea
   transitively — they're separate `compileOnly` entries.
+- **jadx runs plugin MENU actions on its background executor, not the EDT**
+  (verified against decompiled 1.5.5) — the key-binding path IS the EDT.
+  Any action that touches Swing must hop to the EDT first (openAction does).
 - jadx-gui internals are reachable because the plugin classloader's parent
   is the app classloader. Used: `MainWindow.getTabbedPane/getTabsController/
   getCacheObject`, `TabsController.codeJump`, `JNodeCache.makeFrom`,
@@ -117,7 +120,10 @@ Scratch harness pattern used throughout (see git history / review log):
   `ServiceLoader.load(JadxPlugin.class)` — plugin must appear.
 - Preprocessor: call `DeckPreprocess.INSTANCE.rewrite(md, port)` from Java;
   regression cases: token in backticks/fences stays plain, `` `<style>` ``
-  *mention* must NOT latch raw-HTML mode, `assets/@logo.png` untouched,
+  *mention* must NOT latch raw-HTML mode, double-backtick spans
+  (``` ``@x`` ```) stay plain, a line-leading ``` inside `<script>` must
+  NOT open a phantom fence (fence and raw-HTML state machines are
+  mutually exclusive, raw HTML first), `assets/@logo.png` untouched,
   email `@` untouched, trailing-dot FQN not swallowed.
 - Slidev E2E: call `Engines.INSTANCE.startSlidev(deck)` from Java (import
   `jadxslides.shadow.kotlin.Pair` — relocation!), curl the returned URL
