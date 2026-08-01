@@ -142,22 +142,17 @@ object Slides {
         browserHasKeyboard = false // nothing owns the keyboard anymore
     }
 
-    /** Closes still in flight on their daemon threads; quitCleanup finishes
-     * them synchronously so a JVM exit can't strand a Slidev child process. */
-    private val closing = java.util.concurrent.ConcurrentHashMap.newKeySet<DeckSession>()
+    /** All session teardown funnels through one worker: DeckSession.close
+     * blocks (child-process shutdown, in-flight render) so it must stay off
+     * the EDT, and serializing closes means quitCleanup can simply drain
+     * this executor to guarantee no Slidev child outlives the JVM. */
+    private val closer = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "jadx-slides-close").apply { isDaemon = true }
+    }
 
-    /** Session teardown blocks (child-process shutdown, in-flight render) —
-     * never run it on the EDT. */
     private fun closeSessionAsync(s: DeckSession?) {
         if (s == null) return
-        closing.add(s)
-        Thread({
-            try {
-                runCatching { s.close() }
-            } finally {
-                closing.remove(s)
-            }
-        }, "jadx-slides-close").apply { isDaemon = true }.start()
+        runCatching { closer.execute { runCatching { s.close() } } }
     }
 
     fun closeAction() {
@@ -269,34 +264,52 @@ object Slides {
             try {
                 val app = CefHolder.getOrBuild { msg -> p.showStatus(msg) }
                 SwingUtilities.invokeLater {
-                    val client = app.createClient()
-                    // keys reach both the native browser and whichever Swing
-                    // component holds the AWT focus (the code area — so arrow
-                    // keys moved slides AND code); park the AWT focus while
-                    // the browser owns the keyboard
-                    client.addFocusHandler(object : CefFocusHandlerAdapter() {
-                        override fun onGotFocus(browser: CefBrowser) {
-                            if (browserHasKeyboard) return
-                            browserHasKeyboard = true
-                            KeyboardFocusManager.getCurrentKeyboardFocusManager()
-                                .clearGlobalFocusOwner()
-                            browser.setFocus(true)
+                    // the EDT body runs outside the outer catch's dynamic
+                    // scope — its own try/finally must clear cefStarting, or
+                    // one createBrowser failure disables the view for good
+                    try {
+                        val cur = session
+                        if (cur == null) {
+                            // the deck was closed while CEF was building —
+                            // nothing to show
+                            return@invokeLater
                         }
+                        val client = app.createClient()
+                        // keys reach both the native browser and whichever
+                        // Swing component holds the AWT focus (the code area
+                        // — so arrow keys moved slides AND code); park the
+                        // AWT focus while the browser owns the keyboard
+                        client.addFocusHandler(object : CefFocusHandlerAdapter() {
+                            override fun onGotFocus(browser: CefBrowser) {
+                                if (browserHasKeyboard) return
+                                browserHasKeyboard = true
+                                KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                                    .clearGlobalFocusOwner()
+                                browser.setFocus(true)
+                            }
 
-                        override fun onTakeFocus(browser: CefBrowser, next: Boolean) {
-                            browserHasKeyboard = false
-                        }
-                    })
-                    installKeyGuard()
-                    val browser = client.createBrowser(s.url, false, false)
-                    cefClient = client
-                    cefBrowser = browser
-                    cefStarting = false
-                    installCefCleanup(mw)
-                    p.attachBrowser(browser.uiComponent)
-                    p.focusSoon()
-                    // the session may have changed while CEF was building
-                    session?.let { cur -> if (cur !== s) browser.loadURL(cur.url) }
+                            override fun onTakeFocus(browser: CefBrowser, next: Boolean) {
+                                browserHasKeyboard = false
+                            }
+                        })
+                        installKeyGuard()
+                        // always the CURRENT session's url — s may be stale
+                        val browser = client.createBrowser(cur.url, false, false)
+                        cefClient = client
+                        cefBrowser = browser
+                        installCefCleanup(mw)
+                        p.attachBrowser(browser.uiComponent)
+                        p.focusSoon()
+                    } catch (t: Throwable) {
+                        log.error("JCEF browser creation failed — falling back to the system browser", t)
+                        p.showStatus(
+                            "Embedded browser unavailable (${t.message})<br>" +
+                                    "The deck was opened in the system browser instead.",
+                        )
+                        session?.let { openExternal(it.url) }
+                    } finally {
+                        cefStarting = false
+                    }
                 }
             } catch (t: Throwable) {
                 cefStarting = false
@@ -305,7 +318,7 @@ object Slides {
                     "Embedded browser unavailable (${t.message})<br>" +
                             "The deck was opened in the system browser instead.",
                 )
-                openExternal(s.url)
+                session?.let { openExternal(it.url) }
             }
         }, "jadx-slides-cef").apply { isDaemon = true }.start()
     }
@@ -345,29 +358,35 @@ object Slides {
         // only act once the window is actually gone. jadx's System.exit
         // path never disposes the window; the shutdown hook covers it.
         mw.addWindowListener(object : java.awt.event.WindowAdapter() {
-            override fun windowClosed(e: java.awt.event.WindowEvent) = quitCleanup()
+            override fun windowClosed(e: java.awt.event.WindowEvent) {
+                // windowClosed fires on the EDT but quitCleanup blocks on
+                // process shutdown — run it on a worker the JVM waits for
+                Thread({ quitCleanup() }, "jadx-slides-quit").start()
+            }
         })
         Runtime.getRuntime().addShutdownHook(Thread({ quitCleanup() }, "jadx-slides-cef-cleanup"))
     }
 
-    /** Real quit: kill the deck session (Slidev child process, temp files)
-     * and tear the browser down. Idempotent; runs at most once per hook. */
+    /** Real quit (worker/shutdown-hook thread, never the EDT): kill the deck
+     * session (Slidev child process, temp files) and tear the browser down.
+     * DeckSession.close is idempotent, so overlapping hooks are safe. */
     private fun quitCleanup() {
         openGen.incrementAndGet()
         val s = session
         session = null
-        runCatching { s?.close() } // synchronous: the JVM is going away
-        // finish any async close a tab dispose kicked off moments ago —
-        // its daemon thread dies with the JVM, this thread must not
-        closing.forEach { runCatching { it.close() } }
+        closeSessionAsync(s)
+        // drain the close worker so a JVM exit can't strand a Slidev child
+        closer.shutdown()
+        runCatching { closer.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS) }
         disposeCef()
     }
 
     @Synchronized // shutdown hook and EDT can race here
     private fun disposeCef() {
-        // detach first: a still-parented browser keeps receiving AWT UI
-        // updates and crashes in util_mac::UpdateView during teardown
-        panel?.detachBrowser()
+        // detach first — synchronously, even from the shutdown hook: a
+        // still-parented browser keeps receiving AWT UI updates and crashes
+        // in util_mac::UpdateView during teardown
+        panel?.detachBrowserNow()
         runCatching { cefBrowser?.close(true) }
         cefBrowser = null
         runCatching { cefClient?.dispose() }

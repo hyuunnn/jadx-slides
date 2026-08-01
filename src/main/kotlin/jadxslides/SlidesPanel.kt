@@ -88,7 +88,31 @@ class SlidesPanel(
     }
 
     /** Remove the browser from the hierarchy so AWT stops sending it UI updates. */
-    fun detachBrowser() = onEdt {
+    fun detachBrowser() = onEdt { doDetach() }
+
+    /**
+     * Blocking detach for teardown paths off the EDT (shutdown hook): the
+     * browser must be OUT of the hierarchy before CefBrowser.close(), or
+     * AWT keeps updating the dying native view (util_mac::UpdateView crash).
+     * Bounded wait — at shutdown the EDT may already be gone.
+     */
+    fun detachBrowserNow() {
+        if (SwingUtilities.isEventDispatchThread()) {
+            doDetach()
+            return
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        SwingUtilities.invokeLater {
+            try {
+                doDetach()
+            } finally {
+                latch.countDown()
+            }
+        }
+        runCatching { latch.await(1, java.util.concurrent.TimeUnit.SECONDS) }
+    }
+
+    private fun doDetach() {
         browserComponent = null
         content.removeAll()
         content.add(status, BorderLayout.CENTER)

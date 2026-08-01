@@ -35,9 +35,17 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
             }
         }
 
-    /** Marp html to serve at `/` and the dir static assets resolve against. */
+    /** Marp html to serve at `/` and the dir static assets resolve against.
+     * deckOwner identifies which session set them — File equality is
+     * path-based, so reopening the same deck needs an identity check. */
     @Volatile var deckHtml: File? = null
     @Volatile var deckDir: File? = null
+    @Volatile var deckOwner: Any? = null
+
+    private val pendingJump = java.util.concurrent.atomic.AtomicReference<String?>()
+    private val jumpExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "jadx-slides-jump").apply { isDaemon = true }
+    }
 
     val port: Int get() = listeningPort
 
@@ -70,10 +78,15 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
                 val token = session.parms["t"]
                 if (!token.isNullOrBlank()) {
                     // resolution may decompile classes — keep it off this
-                    // request thread (respond immediately) and off the EDT
-                    // (JumpService defers only the UI part there)
-                    Thread({ JumpService.jump(token) }, "jadx-slides-jump")
-                        .apply { isDaemon = true }.start()
+                    // request thread (respond immediately) and off the EDT.
+                    // One worker + latest-token-wins: this is an open local
+                    // endpoint and only one jump can land anyway, so rapid
+                    // clicks must not each spawn a decompilation thread
+                    pendingJump.set(token)
+                    jumpExecutor.execute {
+                        val t = pendingJump.getAndSet(null) ?: return@execute
+                        JumpService.jump(t)
+                    }
                 }
                 return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
             }

@@ -65,7 +65,7 @@ object JumpService {
                 // code loads asynchronously after codeJump; retry until the
                 // area has content, then keep verifying — jadx's own def-pos
                 // jump can land after ours and clobber it
-                scrollToLine(mw, line, attempt = 0, verified = 0)
+                scrollToLine(mw, node, line, attempt = 0, verified = 0)
             }
         }
     }
@@ -122,16 +122,30 @@ object JumpService {
         return classes.firstOrNull { it.name == short }
     }
 
-    private fun scrollToLine(mw: MainWindow, line: Int, attempt: Int, verified: Int) {
+    private fun scrollToLine(
+        mw: MainWindow,
+        target: jadx.gui.treemodel.JNode,
+        line: Int,
+        attempt: Int,
+        verified: Int,
+    ) {
         if (attempt > 100) { // ~15s: big obfuscated classes decompile slowly
             LOG.warn("jadx-slides: code view not ready in time, line {} jump skipped", line)
             return
         }
         val timer = Timer(150) {
             val panel = mw.tabbedPane.selectedContentPanel as? AbstractCodeContentPanel
-            val area = panel?.codeArea
+            // never scroll a tab that isn't the jump target — the user may
+            // have switched tabs while the target class decompiles
+            val targetRoot = target.rootClass ?: target
+            val panelNode = panel?.node
+            if (panel == null || (panelNode !== targetRoot && panelNode?.rootClass !== targetRoot)) {
+                scrollToLine(mw, target, line, attempt + 1, verified)
+                return@Timer
+            }
+            val area = panel.codeArea
             if (area == null || area.document.length == 0) {
-                scrollToLine(mw, line, attempt + 1, verified)
+                scrollToLine(mw, target, line, attempt + 1, verified)
                 return@Timer
             }
             try {
@@ -142,7 +156,7 @@ object JumpService {
                 }
                 // verify twice more: jadx's queued def-pos jump may override
                 if (verified < 2) {
-                    scrollToLine(mw, line, attempt + 1, verified + 1)
+                    scrollToLine(mw, target, line, attempt + 1, verified + 1)
                 }
             } catch (e: Exception) {
                 LOG.debug("line scroll failed", e)

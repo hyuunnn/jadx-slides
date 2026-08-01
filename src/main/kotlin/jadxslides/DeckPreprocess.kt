@@ -33,7 +33,10 @@ object DeckPreprocess {
     // raw HTML style/script blocks: CSS at-rules (@media, @apply, …) and JS
     // decorators must not be rewritten into anchors
     private val HTML_RAW_OPEN = Regex("(?i)<(style|script)\\b")
-    private fun htmlRawClose(tag: String) = Regex("(?i)</$tag\\s*>")
+    private val HTML_RAW_CLOSE = mapOf(
+        "style" to Regex("(?i)</style\\s*>"),
+        "script" to Regex("(?i)</script\\s*>"),
+    )
 
     private val INLINE_CODE_RE = Regex("`[^`]*`")
 
@@ -82,17 +85,20 @@ object DeckPreprocess {
                 out.add(line)
                 continue
             }
+            // a `<style>` mentioned in backticks is prose, not an open tag —
+            // match tags against the line with inline-code spans blanked out
+            val masked = INLINE_CODE_RE.replace(line) { " ".repeat(it.value.length) }
             val tag = rawTag
             if (tag != null) {
                 out.add(line)
-                if (htmlRawClose(tag).containsMatchIn(line)) rawTag = null
+                if (HTML_RAW_CLOSE.getValue(tag).containsMatchIn(masked)) rawTag = null
                 continue
             }
-            val open = HTML_RAW_OPEN.find(line)
+            val open = HTML_RAW_OPEN.find(masked)
             if (open != null) {
                 out.add(line) // leave the whole opening line alone
-                val t = open.groupValues[1]
-                if (!htmlRawClose(t).containsMatchIn(line.substring(open.range.last + 1))) {
+                val t = open.groupValues[1].lowercase()
+                if (!HTML_RAW_CLOSE.getValue(t).containsMatchIn(masked.substring(open.range.last + 1))) {
                     rawTag = t
                 }
                 continue

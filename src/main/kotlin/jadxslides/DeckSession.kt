@@ -33,7 +33,7 @@ class DeckSession(val source: File, val engine: Engine) {
     private var watchThread: Thread? = null
     private var bridgeRef: BridgeServer? = null
 
-    @Volatile private var closed = false
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     private val debounce = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "jadx-slides-debounce").apply { isDaemon = true }
     }
@@ -53,6 +53,7 @@ class DeckSession(val source: File, val engine: Engine) {
             Engine.HTML -> {
                 bridge.deckHtml = source
                 bridge.deckDir = dir
+                bridge.deckOwner = this
                 url = "http://127.0.0.1:${bridge.port}/"
             }
             Engine.MARP -> {
@@ -60,6 +61,7 @@ class DeckSession(val source: File, val engine: Engine) {
                 Engines.renderMarp(prepared.toPath(), htmlOut.toPath())?.let { return it }
                 bridge.deckHtml = htmlOut
                 bridge.deckDir = dir
+                bridge.deckOwner = this
                 url = "http://127.0.0.1:${bridge.port}/"
             }
             Engine.SLIDEV -> {
@@ -113,7 +115,7 @@ class DeckSession(val source: File, val engine: Engine) {
     }
 
     private fun rerender(bridge: BridgeServer) {
-        if (closed) return
+        if (closed.get()) return
         try {
             when (engine) {
                 Engine.HTML -> bridge.bumpVersion()
@@ -129,36 +131,50 @@ class DeckSession(val source: File, val engine: Engine) {
         } finally {
             // a close that raced this rerender already ran its deletes —
             // don't leave freshly rewritten siblings behind
-            if (closed && engine != Engine.HTML) {
-                prepared.delete()
-                htmlOut.delete()
+            if (closed.get() && engine != Engine.HTML) {
+                deleteSiblingsUnlessReused()
             }
         }
     }
 
-    /** May block (child-process shutdown, in-flight render) — call off the EDT. */
+    /**
+     * Re-opening the same deck derives the SAME sibling paths, and the new
+     * session is prepared before this one is closed — deleting by path here
+     * would destroy the files the successor is serving.
+     */
+    private fun deleteSiblingsUnlessReused() {
+        val successor = Slides.session
+        if (successor != null && successor !== this && successor.prepared == prepared) return
+        prepared.delete()
+        htmlOut.delete()
+    }
+
+    /** May block (child-process shutdown, in-flight render) — call off the
+     * EDT. Idempotent: only the first call does the work. */
     fun close() {
-        closed = true
+        if (!closed.compareAndSet(false, true)) return
         pending?.cancel(false)
         debounce.shutdownNow()
         // let an already-running rerender finish (or hit its interrupt) so
-        // the deletes below can't race a preprocess/marp write
-        runCatching { debounce.awaitTermination(10, TimeUnit.SECONDS) }
+        // the deletes below can't race a preprocess/marp write; the render
+        // was interrupted, so a short bound is enough
+        runCatching { debounce.awaitTermination(2, TimeUnit.SECONDS) }
         watchThread?.interrupt()
         runCatching { watchService?.close() }
         slidev?.let { runCatching { it.stop() } }
         slidev = null
         bridgeRef?.let {
-            // stop serving the closed deck's directory; leave the bridge
-            // alone if another session already took it over
-            if (it.deckHtml == source || it.deckHtml == htmlOut) {
+            // stop serving the closed deck — unless a newer session already
+            // took the bridge over (identity check: paths collide when the
+            // same deck is reopened)
+            if (it.deckOwner === this) {
                 it.deckHtml = null
                 it.deckDir = null
+                it.deckOwner = null
             }
         }
         if (engine != Engine.HTML) {
-            prepared.delete()
-            htmlOut.delete()
+            deleteSiblingsUnlessReused()
         }
     }
 }

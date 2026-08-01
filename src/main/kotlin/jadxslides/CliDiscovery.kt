@@ -49,7 +49,11 @@ object CliDiscovery {
     private val found = java.util.concurrent.ConcurrentHashMap<String, File>()
 
     fun find(tool: String): File? {
-        found[tool]?.let { return it }
+        found[tool]?.let {
+            // validate: an nvm upgrade/uninstall can delete a cached path
+            if (it.isFile) return it
+            found.remove(tool)
+        }
         for (dir in candidateDirs()) {
             executable(dir, tool)?.let {
                 found[tool] = it
