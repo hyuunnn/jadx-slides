@@ -48,6 +48,7 @@ object Engines {
     fun renderMarp(prepared: Path, out: Path): String? {
         val marp = CliDiscovery.find("marp")
             ?: return "marp CLI not found — install with: npm i -g @marp-team/marp-cli"
+        var proc: Process? = null
         return try {
             val pb = ProcessBuilder(
                 CliDiscovery.command(
@@ -58,16 +59,31 @@ object Engines {
             pb.directory(prepared.parent.toFile())
             pb.environment().putAll(CliDiscovery.childEnv(marp))
             pb.redirectErrorStream(true)
-            val proc = pb.start()
-            val output = proc.inputStream.bufferedReader().readText()
-            if (!proc.waitFor(90, TimeUnit.SECONDS)) {
-                proc.destroyForcibly()
+            val p = pb.start()
+            proc = p
+            // drain on a separate thread: reading to EOF inline would make
+            // the 90s timeout unreachable when marp hangs with the pipe open
+            val output = StringBuilder()
+            val drain = Thread({
+                p.inputStream.bufferedReader().forEachLine {
+                    synchronized(output) { output.appendLine(it) }
+                }
+            }, "jadx-slides-marp-log").apply { isDaemon = true }
+            drain.start()
+            if (!p.waitFor(90, TimeUnit.SECONDS)) {
+                p.destroyForcibly()
                 return "marp timed out"
             }
-            if (proc.exitValue() != 0 || !out.toFile().isFile) {
-                LOG.warn("marp failed: {}", output)
-                "marp failed (exit ${proc.exitValue()}) — see log"
+            drain.join(2_000)
+            if (p.exitValue() != 0 || !out.toFile().isFile) {
+                LOG.warn("marp failed: {}", synchronized(output) { output.toString() })
+                "marp failed (exit ${p.exitValue()}) — see log"
             } else null
+        } catch (e: InterruptedException) {
+            // session closed mid-render: don't let the child outlive us
+            proc?.destroyForcibly()
+            Thread.currentThread().interrupt()
+            "marp render interrupted"
         } catch (e: Exception) {
             LOG.error("marp spawn failed", e)
             "failed to start marp: ${e.message}"

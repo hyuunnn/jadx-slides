@@ -62,15 +62,35 @@ object CefHolder {
             })
             val built = builder.build()
             // jadx closes the plugin classloader before JVM shutdown hooks
-            // run; CefApp.shutdown lazily loads anonymous inner classes at
-            // that point and dies with NoClassDefFoundError — load them now
+            // run; CefApp.shutdown lazily loads nested classes at that point
+            // and dies with NoClassDefFoundError — load them all now. The
+            // names are enumerated from the jar so the list survives jcef
+            // version bumps (anonymous-class numbering is a compiler artifact).
             val cl = CefHolder::class.java.classLoader
-            val inner = (1..10).map { "$it" } + "6\$1"
-            for (suffix in inner) {
-                runCatching { Class.forName("org.cef.CefApp\$$suffix", true, cl) }
+            for (name in cefAppNestedClasses(cl)) {
+                runCatching { Class.forName(name, true, cl) }
             }
             app = built
             return built
         }
+    }
+
+    /** All org.cef.CefApp nested classes, read from the jar that serves the
+     * class; falls back to the known jcef-135 names outside a jar (dev runs). */
+    private fun cefAppNestedClasses(cl: ClassLoader): List<String> {
+        val enumerated = runCatching {
+            (cl.getResource("org/cef/CefApp.class")
+                ?.openConnection() as? java.net.JarURLConnection)
+                ?.jarFile
+                ?.entries()
+                ?.asSequence()
+                ?.map { it.name }
+                ?.filter { it.startsWith("org/cef/CefApp$") && it.endsWith(".class") }
+                ?.map { it.removeSuffix(".class").replace('/', '.') }
+                ?.toList()
+        }.getOrNull().orEmpty()
+        if (enumerated.isNotEmpty()) return enumerated
+        return (1..10).map { "org.cef.CefApp\$$it" } +
+                listOf("org.cef.CefApp\$6\$1", "org.cef.CefApp\$CefVersion", "org.cef.CefApp\$CefAppState")
     }
 }

@@ -43,9 +43,18 @@ object CliDiscovery {
         return null
     }
 
+    // hits are cached (tool locations don't move within a session; the scan
+    // stats dozens of dirs and runs on every render); misses keep rescanning
+    // so a CLI installed mid-session is still picked up
+    private val found = java.util.concurrent.ConcurrentHashMap<String, File>()
+
     fun find(tool: String): File? {
+        found[tool]?.let { return it }
         for (dir in candidateDirs()) {
-            executable(dir, tool)?.let { return it }
+            executable(dir, tool)?.let {
+                found[tool] = it
+                return it
+            }
         }
         return null
     }
@@ -73,9 +82,13 @@ object CliDiscovery {
         val extra = LinkedHashSet<String>()
         extra.add(tool.parentFile.absolutePath)
         find("node")?.let { extra.add(it.parentFile.absolutePath) }
-        val path = env["PATH"] ?: ""
-        env["PATH"] = (extra.joinToString(File.pathSeparator) +
-                File.pathSeparator + path)
+        // Windows names the variable "Path" and this copy is case-sensitive:
+        // match case-insensitively so we extend the real entry instead of
+        // adding a second, truncated PATH that races it in the child env
+        val key = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
+        val path = env[key].orEmpty()
+        env[key] = extra.joinToString(File.pathSeparator) +
+                if (path.isEmpty()) "" else File.pathSeparator + path
         return env
     }
 }

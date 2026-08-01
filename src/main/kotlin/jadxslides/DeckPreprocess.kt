@@ -26,7 +26,14 @@ object DeckPreprocess {
                 "|[A-Za-z_$][\\w.$]*[\\w$]" +
                 "|[A-Za-z_$]"
 
-    val TOKEN_RE = Regex("(?<![A-Za-z0-9_@])@($NAME_PATTERN)(?::(\\d+))?")
+    // the lookbehind also rejects '/' and '\' so @-segments inside URLs and
+    // paths (assets/@logo.png, node_modules/@marp-team/…) stay untouched
+    val TOKEN_RE = Regex("(?<![A-Za-z0-9_@/\\\\])@($NAME_PATTERN)(?::(\\d+))?")
+
+    // raw HTML style/script blocks: CSS at-rules (@media, @apply, …) and JS
+    // decorators must not be rewritten into anchors
+    private val HTML_RAW_OPEN = Regex("(?i)<(style|script)\\b")
+    private fun htmlRawClose(tag: String) = Regex("(?i)</$tag\\s*>")
 
     private val INLINE_CODE_RE = Regex("`[^`]*`")
 
@@ -69,9 +76,31 @@ object DeckPreprocess {
 
         val out = ArrayList<String>(lines.size)
         out.addAll(head)
+        var rawTag: String? = null // inside a <style>/<script> block
         for ((line, inCode) in MarpMarkdown.iterFenced(body)) {
-            out.add(if (inCode) line else rewriteLine(line, bridgePort))
+            if (inCode) {
+                out.add(line)
+                continue
+            }
+            val tag = rawTag
+            if (tag != null) {
+                out.add(line)
+                if (htmlRawClose(tag).containsMatchIn(line)) rawTag = null
+                continue
+            }
+            val open = HTML_RAW_OPEN.find(line)
+            if (open != null) {
+                out.add(line) // leave the whole opening line alone
+                val t = open.groupValues[1]
+                if (!htmlRawClose(t).containsMatchIn(line.substring(open.range.last + 1))) {
+                    rawTag = t
+                }
+                continue
+            }
+            out.add(rewriteLine(line, bridgePort))
         }
-        return out.joinToString("\n") + if (text.endsWith("\n")) "\n" else ""
+        // text.lines() keeps a trailing empty element, so the join already
+        // reproduces a trailing newline — appending another would grow the file
+        return out.joinToString("\n")
     }
 }

@@ -9,9 +9,10 @@ import org.slf4j.LoggerFactory
 import javax.swing.Timer
 
 /**
- * Resolve an `@` token and jump the jadx-gui code view. Runs on the EDT
- * (the bridge defers to it). Uses jadx-gui internals — safe because the
- * plugin classloader's parent is the application classloader.
+ * Resolve an `@` token and jump the jadx-gui code view. Resolution runs on
+ * the caller's thread (it may decompile classes — never the EDT); only the
+ * UI jump is deferred to the EDT. Uses jadx-gui internals — safe because
+ * the plugin classloader's parent is the application classloader.
  */
 object JumpService {
     private val LOG = LoggerFactory.getLogger(JumpService::class.java)
@@ -48,19 +49,24 @@ object JumpService {
         val decompiler = Slides.ctx?.decompiler ?: mw.wrapper.decompiler
         val ref = parse(raw)
 
+        // resolve here, on the caller's thread: member lookup can trigger a
+        // full class decompilation and the short-name search scans the whole
+        // class list — both would freeze the UI on the EDT
         val target = resolve(decompiler, ref)
         if (target == null) {
             LOG.warn("jadx-slides: no such class/member: @{}", raw)
             return
         }
-        val node = mw.cacheObject.nodeCache.makeFrom(target)
-        mw.tabsController.codeJump(node)
-        val line = ref.line
-        if (line != null) {
-            // code loads asynchronously after codeJump; retry until the
-            // area has content, then keep verifying — jadx's own def-pos
-            // jump can land after ours and clobber it
-            scrollToLine(mw, line, attempt = 0, verified = 0)
+        javax.swing.SwingUtilities.invokeLater {
+            val node = mw.cacheObject.nodeCache.makeFrom(target)
+            mw.tabsController.codeJump(node)
+            val line = ref.line
+            if (line != null) {
+                // code loads asynchronously after codeJump; retry until the
+                // area has content, then keep verifying — jadx's own def-pos
+                // jump can land after ours and clobber it
+                scrollToLine(mw, line, attempt = 0, verified = 0)
+            }
         }
     }
 
@@ -117,7 +123,10 @@ object JumpService {
     }
 
     private fun scrollToLine(mw: MainWindow, line: Int, attempt: Int, verified: Int) {
-        if (attempt > 30) return
+        if (attempt > 100) { // ~15s: big obfuscated classes decompile slowly
+            LOG.warn("jadx-slides: code view not ready in time, line {} jump skipped", line)
+            return
+        }
         val timer = Timer(150) {
             val panel = mw.tabbedPane.selectedContentPanel as? AbstractCodeContentPanel
             val area = panel?.codeArea

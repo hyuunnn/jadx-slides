@@ -5,7 +5,6 @@ import org.slf4j.LoggerFactory
 import java.io.File
 import java.io.FileInputStream
 import java.util.concurrent.atomic.AtomicLong
-import javax.swing.SwingUtilities
 
 /**
  * Local bridge on 127.0.0.1: serves the rendered Marp deck (plus its assets)
@@ -18,11 +17,23 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
     private val version = AtomicLong(1)
 
     // NanoHTTPD logs SEVERE "Broken pipe" whenever the browser drops a
-    // connection mid-response (every live-reload does this); silence its
-    // JUL logger — kept as a field so JUL can't GC the setting away
+    // connection mid-response (every live-reload does this); drop only the
+    // socket-error records so real server failures still reach the log —
+    // kept as a field so JUL can't GC the setting away
     private val nanoLogger = java.util.logging.Logger
         .getLogger(NanoHTTPD::class.java.name)
-        .apply { level = java.util.logging.Level.OFF }
+        .apply {
+            filter = java.util.logging.Filter { record ->
+                var t = record.thrown
+                while (t != null) {
+                    if (t is java.net.SocketException || t is java.net.SocketTimeoutException) {
+                        return@Filter false
+                    }
+                    t = t.cause
+                }
+                true
+            }
+        }
 
     /** Marp html to serve at `/` and the dir static assets resolve against. */
     @Volatile var deckHtml: File? = null
@@ -58,7 +69,11 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
             "/jump" -> {
                 val token = session.parms["t"]
                 if (!token.isNullOrBlank()) {
-                    SwingUtilities.invokeLater { JumpService.jump(token) }
+                    // resolution may decompile classes — keep it off this
+                    // request thread (respond immediately) and off the EDT
+                    // (JumpService defers only the UI part there)
+                    Thread({ JumpService.jump(token) }, "jadx-slides-jump")
+                        .apply { isDaemon = true }.start()
                 }
                 return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
             }
@@ -98,7 +113,10 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
             ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         val target = File(dir, uri.trimStart('/'))
         val canonical = target.canonicalFile
-        if (!canonical.path.startsWith(dir.canonicalFile.path) || !canonical.isFile) {
+        // component-wise containment: a raw string prefix would also admit
+        // sibling dirs like <deckDir>-private, and NanoHTTPD percent-decodes
+        // but does not normalize "..", so canonicalize before comparing
+        if (!canonical.toPath().startsWith(dir.canonicalFile.toPath()) || !canonical.isFile) {
             return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "not found")
         }
         val mime = getMimeTypeForFile(canonical.name)

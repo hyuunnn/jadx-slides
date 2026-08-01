@@ -60,6 +60,12 @@ object Slides {
     private var movingPanel = false // tab close caused by dock toggle, not the user
     private var cefCleanupInstalled = false
     private var keyGuardInstalled = false
+    @Volatile private var cefStarting = false // first browser build in flight
+
+    /** Bumped on every open/close; an openDeck whose generation is stale
+     * must discard (and close) the session it prepared instead of
+     * publishing it — otherwise overlapping opens leak Slidev processes. */
+    private val openGen = java.util.concurrent.atomic.AtomicLong()
 
     /** True while the CEF browser owns the keyboard (last click was on slides). */
     @Volatile private var browserHasKeyboard = false
@@ -128,10 +134,30 @@ object Slides {
     /** Tab dispose calls this — tear the session down but leave the tab alone. */
     fun onTabClosed() {
         if (movingPanel) return // the dock toggle is relocating the panel, not closing
+        openGen.incrementAndGet() // supersede any in-flight open
         val s = session
         session = null
-        s?.close()
+        closeSessionAsync(s)
         cefBrowser?.loadURL("about:blank")
+        browserHasKeyboard = false // nothing owns the keyboard anymore
+    }
+
+    /** Closes still in flight on their daemon threads; quitCleanup finishes
+     * them synchronously so a JVM exit can't strand a Slidev child process. */
+    private val closing = java.util.concurrent.ConcurrentHashMap.newKeySet<DeckSession>()
+
+    /** Session teardown blocks (child-process shutdown, in-flight render) —
+     * never run it on the EDT. */
+    private fun closeSessionAsync(s: DeckSession?) {
+        if (s == null) return
+        closing.add(s)
+        Thread({
+            try {
+                runCatching { s.close() }
+            } finally {
+                closing.remove(s)
+            }
+        }, "jadx-slides-close").apply { isDaemon = true }.start()
     }
 
     fun closeAction() {
@@ -176,22 +202,32 @@ object Slides {
         }
     }
 
-    /** Background thread: render pipeline, then hand off to the EDT. */
+    /** Background thread: render pipeline, then hand off to the EDT.
+     * Publishing happens on the EDT under a generation check so overlapping
+     * opens (or a close racing an open) can't leak the prepared session. */
     private fun openDeck(file: File) {
+        val gen = openGen.incrementAndGet()
         try {
-            session?.close()
-            session = null
-
             val text = file.readText(Charsets.UTF_8).removePrefix("﻿")
             val engine = Engines.detect(file.toPath(), text)
             val s = DeckSession(file, engine)
             val err = s.prepare(bridge)
             if (err != null) {
+                closeSessionAsync(s)
                 showError(err)
                 return
             }
-            session = s
-            SwingUtilities.invokeLater { showView(s) }
+            SwingUtilities.invokeLater {
+                if (gen != openGen.get()) {
+                    // a newer open or a close superseded this one
+                    closeSessionAsync(s)
+                    return@invokeLater
+                }
+                val old = session
+                session = s
+                closeSessionAsync(old)
+                showView(s)
+            }
         } catch (t: Throwable) {
             log.error("failed to open deck {}", file, t)
             showError("Failed to open the deck: ${t.message}")
@@ -222,6 +258,13 @@ object Slides {
             p.focusSoon()
             return
         }
+        if (cefStarting) {
+            // the first build is still in flight (possibly a ~100MB native
+            // download); it navigates to the current session when it lands —
+            // building a second browser here would orphan a native renderer
+            return
+        }
+        cefStarting = true
         Thread({
             try {
                 val app = CefHolder.getOrBuild { msg -> p.showStatus(msg) }
@@ -248,11 +291,15 @@ object Slides {
                     val browser = client.createBrowser(s.url, false, false)
                     cefClient = client
                     cefBrowser = browser
+                    cefStarting = false
                     installCefCleanup(mw)
                     p.attachBrowser(browser.uiComponent)
                     p.focusSoon()
+                    // the session may have changed while CEF was building
+                    session?.let { cur -> if (cur !== s) browser.loadURL(cur.url) }
                 }
             } catch (t: Throwable) {
+                cefStarting = false
                 log.error("JCEF init failed — falling back to the system browser", t)
                 p.showStatus(
                     "Embedded browser unavailable (${t.message})<br>" +
@@ -292,13 +339,31 @@ object Slides {
     private fun installCefCleanup(mw: MainWindow) {
         if (cefCleanupInstalled) return
         cefCleanupInstalled = true
+        // windowClosing would fire BEFORE jadx decides whether to really
+        // quit (its DO_NOTHING_ON_CLOSE handler can cancel via the save
+        // prompt), which used to kill the browser under a still-open deck —
+        // only act once the window is actually gone. jadx's System.exit
+        // path never disposes the window; the shutdown hook covers it.
         mw.addWindowListener(object : java.awt.event.WindowAdapter() {
-            override fun windowClosing(e: java.awt.event.WindowEvent) = disposeCef()
-            override fun windowClosed(e: java.awt.event.WindowEvent) = disposeCef()
+            override fun windowClosed(e: java.awt.event.WindowEvent) = quitCleanup()
         })
-        Runtime.getRuntime().addShutdownHook(Thread({ disposeCef() }, "jadx-slides-cef-cleanup"))
+        Runtime.getRuntime().addShutdownHook(Thread({ quitCleanup() }, "jadx-slides-cef-cleanup"))
     }
 
+    /** Real quit: kill the deck session (Slidev child process, temp files)
+     * and tear the browser down. Idempotent; runs at most once per hook. */
+    private fun quitCleanup() {
+        openGen.incrementAndGet()
+        val s = session
+        session = null
+        runCatching { s?.close() } // synchronous: the JVM is going away
+        // finish any async close a tab dispose kicked off moments ago —
+        // its daemon thread dies with the JVM, this thread must not
+        closing.forEach { runCatching { it.close() } }
+        disposeCef()
+    }
+
+    @Synchronized // shutdown hook and EDT can race here
     private fun disposeCef() {
         // detach first: a still-parented browser keeps receiving AWT UI
         // updates and crashes in util_mac::UpdateView during teardown
@@ -307,6 +372,7 @@ object Slides {
         cefBrowser = null
         runCatching { cefClient?.dispose() }
         cefClient = null
+        browserHasKeyboard = false
     }
 
     /** CEF's macOS Cmd+Q handler lands here (AppKit thread): clean up the
@@ -326,13 +392,11 @@ object Slides {
     }
 
     private fun reloadView() {
+        // EDT-safe: a session exists, so the bridge is already started and
+        // bumpVersion is just an atomic increment
         val s = session ?: return
-        Thread({
-            bridge.bumpVersion()
-            SwingUtilities.invokeLater {
-                if (s.engine == Engine.SLIDEV) cefBrowser?.loadURL(s.url) else cefBrowser?.reload()
-            }
-        }, "jadx-slides-reload").apply { isDaemon = true }.start()
+        bridge.bumpVersion()
+        if (s.engine == Engine.SLIDEV) cefBrowser?.loadURL(s.url) else cefBrowser?.reload()
     }
 
     fun openExternal(url: String) {

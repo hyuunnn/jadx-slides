@@ -31,6 +31,9 @@ class DeckSession(val source: File, val engine: Engine) {
     private var slidev: Engines.SlidevServer? = null
     private var watchService: WatchService? = null
     private var watchThread: Thread? = null
+    private var bridgeRef: BridgeServer? = null
+
+    @Volatile private var closed = false
     private val debounce = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "jadx-slides-debounce").apply { isDaemon = true }
     }
@@ -45,6 +48,7 @@ class DeckSession(val source: File, val engine: Engine) {
 
     /** Full pipeline for the engine; returns an error message or null. */
     fun prepare(bridge: BridgeServer): String? {
+        bridgeRef = bridge
         when (engine) {
             Engine.HTML -> {
                 bridge.deckHtml = source
@@ -109,6 +113,7 @@ class DeckSession(val source: File, val engine: Engine) {
     }
 
     private fun rerender(bridge: BridgeServer) {
+        if (closed) return
         try {
             when (engine) {
                 Engine.HTML -> bridge.bumpVersion()
@@ -121,16 +126,36 @@ class DeckSession(val source: File, val engine: Engine) {
             }
         } catch (e: Exception) {
             log.warn("re-render failed", e)
+        } finally {
+            // a close that raced this rerender already ran its deletes —
+            // don't leave freshly rewritten siblings behind
+            if (closed && engine != Engine.HTML) {
+                prepared.delete()
+                htmlOut.delete()
+            }
         }
     }
 
+    /** May block (child-process shutdown, in-flight render) — call off the EDT. */
     fun close() {
+        closed = true
         pending?.cancel(false)
         debounce.shutdownNow()
+        // let an already-running rerender finish (or hit its interrupt) so
+        // the deletes below can't race a preprocess/marp write
+        runCatching { debounce.awaitTermination(10, TimeUnit.SECONDS) }
         watchThread?.interrupt()
         runCatching { watchService?.close() }
         slidev?.let { runCatching { it.stop() } }
         slidev = null
+        bridgeRef?.let {
+            // stop serving the closed deck's directory; leave the bridge
+            // alone if another session already took it over
+            if (it.deckHtml == source || it.deckHtml == htmlOut) {
+                it.deckHtml = null
+                it.deckDir = null
+            }
+        }
         if (engine != Engine.HTML) {
             prepared.delete()
             htmlOut.delete()
