@@ -19,9 +19,16 @@ plus running jadx-gui. Target: brew jadx **1.5.5** (`compileOnly` pins).
 
 ## Architecture (1 minute)
 
-- `SlidesPlugin` registers a menu action + `Ctrl+Shift+M`. ALL long-lived
-  state lives in `object Slides` — **jadx re-instantiates plugins on every
-  project open**; `init` only swaps `ctx`/`gui` refs.
+- `SlidesPlugin` registers a menu action + `Ctrl+Shift+M`. State lives in
+  `object Slides`, but **that object does NOT survive a project open**:
+  jadx closes the plugin classloader and builds a fresh one each time
+  (`JadxWrapper.open` → `close()` → `new JadxExternalPluginsLoader`,
+  verified in 1.5.6 bytecode), so a new `Slides` comes with it. Only the
+  CefApp and its cached natives are genuinely process-wide. Anything
+  registered GLOBALLY (AWT listeners, key dispatchers) therefore has to be
+  removed in `JadxPlugin.unload()` or it accumulates one set per project
+  open — a docked deck keeps the stale set alive and still swallowing
+  keys.
 - `BridgeServer` (NanoHTTPD, 127.0.0.1:random) serves the rendered Marp
   html + assets, `/jump?t=<token>`, `/version` (poll-based live reload).
   CORS `*` only on `/jump` + `/version` (Slidev's vite origin needs it).
@@ -120,9 +127,16 @@ and routed through `Slides.requestQuit`.
   Dock-only symptom, Tab mode hides the deck and masks it. Calling
   `setFocus` inside a callback additionally recursed to a
   StackOverflowError, and `onSetFocus` is never consulted for the echo, so
-  cancelling there does nothing. Guards: open menus and a non-showing deck
-  are never swallowed. After an `@` jump, the code area legitimately owns
-  the keys.
+  cancelling there does nothing. Guards: keys are swallowed ONLY while the
+  main frame is the focused window — jadx's search/usage/log windows are
+  JFrames and every dialog gains focus with `cause=ACTIVATION`, which the
+  clearer ignores, so without that test the guard ate arrows aimed at
+  them and moved the slides instead (a modality check is not enough; it
+  misses the JFrame ones). `deckPointerDown` applies the same test before
+  parking the AWT focus. Open menus and a non-showing deck are never
+  swallowed either, and after an `@` jump the code area legitimately owns
+  the keys. Both listeners are held in fields and removed in `unload()`
+  (see the classloader note above).
 - **Slidev**: Node ≥17 binds "localhost" to ::1 only → probe BOTH stacks;
   trust the banner's port (vite silently auto-increments on conflict).
   Child processes are killed as a TREE (Windows `.cmd` shim would orphan

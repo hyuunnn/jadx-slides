@@ -54,8 +54,11 @@ JADX_GUI_OPTS="--add-opens=java.desktop/sun.awt=ALL-UNNAMED --add-opens=java.des
 ```
 
 Without them (or if JCEF fails for any reason) the deck opens in the system
-browser instead — jump links still work there. On first use JCEF downloads
-~100MB of natives into `~/.cache/jadx-slides/jcef` (one time).
+browser instead — jump links still work there. You don't have to memorise
+the flags: launched without them, the plugin prints the exact relaunch
+command to the terminal jadx was started from, and the slides tab shows the
+same command as selectable text you can drag-copy. On first use JCEF
+downloads ~100MB of natives into `~/.cache/jadx-slides/jcef` (one time).
 
 **Harmless log noise on macOS**: when jadx-gui is launched from a terminal,
 JCEF prints repeated `Exception in thread "AppKit Thread"` fragments and a

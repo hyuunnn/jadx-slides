@@ -52,8 +52,11 @@ JADX_GUI_OPTS="--add-opens=java.desktop/sun.awt=ALL-UNNAMED --add-opens=java.des
 ```
 
 플래그가 없거나 JCEF가 실패하면 덱이 시스템 브라우저로 열립니다 — 점프
-링크는 거기서도 동작합니다. 최초 사용 시 JCEF 네이티브(~100MB)를
-`~/.cache/jadx-slides/jcef`에 한 번 다운로드합니다.
+링크는 거기서도 동작합니다. 플래그를 외울 필요는 없습니다: 플래그 없이
+실행하면 플러그인이 실행한 터미널에 재실행 명령을 그대로 출력하고,
+슬라이드 탭에도 같은 명령이 **드래그 선택·복사 가능한** 텍스트로 뜹니다.
+최초 사용 시 JCEF 네이티브(~100MB)를 `~/.cache/jadx-slides/jcef`에 한 번
+다운로드합니다.
 
 **macOS의 무해한 로그 소음**: 터미널에서 jadx-gui를 실행하면 JCEF가
 `Exception in thread "AppKit Thread"` 문구와
