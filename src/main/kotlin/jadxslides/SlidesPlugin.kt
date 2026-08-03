@@ -162,12 +162,76 @@ object Slides {
                     panel?.browserComponent?.isShowing == true &&
                     javax.swing.MenuSelectionManager.defaultManager().selectedPath.isEmpty()
         }
-        kfm.addPropertyChangeListener("focusOwner") { ev ->
-            val owner = ev.newValue as? java.awt.Component
-            if (owner != null && owner !== panel?.browserComponent) {
-                browserHasKeyboard = false // user clicked into a Swing component
+        // Who owns the keyboard is decided by user actions only. A focus
+        // change caused by macOS re-activating the window is NOT one: it
+        // restores whatever had focus before the app lost it, which used to
+        // hand the keyboard back to the code area even though the user had
+        // just clicked the deck to come back (log-verified:
+        // `FOCUS_GAINED CodeArea cause=ACTIVATION`).
+        java.awt.Toolkit.getDefaultToolkit().addAWTEventListener({ ev ->
+            when {
+                ev is java.awt.event.FocusEvent &&
+                        ev.id == java.awt.event.FocusEvent.FOCUS_GAINED -> {
+                    if (ev.cause != java.awt.event.FocusEvent.Cause.ACTIVATION) {
+                        val c = ev.component
+                        if (c != null && c !== panel?.browserComponent) browserHasKeyboard = false
+                    }
+                }
+                // a press on any Swing component takes the keyboard back —
+                // needed on top of focus events because clicking a component
+                // that ALREADY holds the AWT focus fires no focus event
+                ev is java.awt.event.MouseEvent &&
+                        ev.id == java.awt.event.MouseEvent.MOUSE_PRESSED -> {
+                    val c = ev.component
+                    if (c != null && c !== panel?.browserComponent) browserHasKeyboard = false
+                }
+                ev is java.awt.event.WindowEvent &&
+                        ev.id == java.awt.event.WindowEvent.WINDOW_ACTIVATED -> onWindowActivated()
+            }
+        }, java.awt.AWTEvent.FOCUS_EVENT_MASK or java.awt.AWTEvent.MOUSE_EVENT_MASK
+                or java.awt.AWTEvent.WINDOW_EVENT_MASK)
+    }
+
+    /**
+     * Re-activating the app never TAKES the keyboard away from the deck:
+     * macOS restores the native first responder along with the window, so
+     * the browser keeps receiving keys either way. Clearing the flag here
+     * made both sides move at once after a Cmd+Tab return — AWT dispatched
+     * to the code area while the native browser was still reading the same
+     * keys.
+     *
+     * It can still GRANT the keyboard: the click that re-activates the app
+     * is swallowed by macOS and never reaches the deck page (log-verified —
+     * no `/kbd` ping follows a WINDOW_ACTIVATED), so a click on the deck is
+     * only visible as "the pointer was over the deck when the window came
+     * back". Anything else leaves the flag alone; a real press on a Swing
+     * component clears it through the listener above.
+     */
+    private fun onWindowActivated() {
+        val comp = panel?.browserComponent ?: return
+        if (!comp.isShowing) return
+        val pointer = java.awt.MouseInfo.getPointerInfo()?.location ?: return
+        val origin = comp.locationOnScreen
+        val overDeck = pointer.x >= origin.x && pointer.x < origin.x + comp.width &&
+                pointer.y >= origin.y && pointer.y < origin.y + comp.height
+        if (overDeck) {
+            browserHasKeyboard = true
+            // the swallowed click never moved the macOS first responder, so
+            // the deck would receive nothing while the guard swallows the
+            // keys on the AWT side — nothing would move at all (verified:
+            // a second click was needed). Ask CEF for the focus explicitly,
+            // queued behind the activation's own focus restore so that
+            // restore cannot take it straight back. Safe to call from here:
+            // the StackOverflowError came from calling setFocus INSIDE a CEF
+            // focus callback, and no such callback exists any more.
+            val browser = cefBrowser
+            if (browser != null) {
+                SwingUtilities.invokeLater { runCatching { browser.setFocus(true) } }
             }
         }
+        // no clearGlobalFocusOwner here: the activation focus restore runs
+        // right after this and would undo it anyway — the key guard already
+        // keeps nav keys away from the restored Swing owner
     }
 
     private val bridgeLazy = lazy {

@@ -96,10 +96,23 @@ and routed through `Slides.requestQuit`.
   strictly worse than DockManager), JxBrowser (commercial).
 - **Keyboard**: macOS delivers keys to BOTH the native browser and the AWT
   focus owner. A global KeyEventDispatcher swallows nav keys while
-  `browserHasKeyboard`. The flag is set ONLY by a real pointer-down inside
-  the deck page (script injected on every load via CefLoadHandler pings the
-  bridge's `/kbd`, which also parks the AWT focus) and cleared ONLY by the
-  AWT focusOwner listener. **Never use CEF focus callbacks as this signal**:
+  `browserHasKeyboard`. Set by: a real pointer-down inside the deck page
+  (script injected on every load via CefLoadHandler pings the bridge's
+  `/kbd`, which also parks the AWT focus), or WINDOW_ACTIVATED with the
+  pointer over the deck. Cleared by: a FOCUS_GAINED whose
+  `FocusEvent.getCause()` is NOT `ACTIVATION`, or an AWT MOUSE_PRESSED on a
+  non-browser component (a click on the component that already holds the
+  AWT focus fires no focus event at all). **App activation must never CLEAR
+  the flag** — macOS restores the native first responder with the window,
+  so the browser keeps reading keys; clearing made both sides move at once
+  after Cmd+Tab. And the click that re-activates the app is swallowed by
+  macOS: no `/kbd` ping follows it and the native first responder does not
+  move, so activation-over-deck both sets the flag and calls
+  `cefBrowser.setFocus(true)` (queued behind the activation's own focus
+  restore) — without it the deck stayed dead until a second click. All
+  log-verified with an instrumented build; `cause=ACTIVATION` vs
+  `cause=MOUSE_EVENT` is what makes window restore distinguishable from a
+  user click without any timing heuristic. **Never use CEF focus callbacks as this signal**:
   CefClient echoes `setFocus(true)` on its own and macOS re-fires
   `onGotFocus` for it in an endless loop (observed live: a continuous
   callback stream while the deck is focused) that outlasts any debounce and
