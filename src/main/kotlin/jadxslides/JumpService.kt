@@ -72,19 +72,27 @@ object JumpService {
         }
     }
 
+    /**
+     * A named member must actually exist: landing on the enclosing class
+     * instead looks like the jump worked, so a typo'd or stale `@Cls.member`
+     * reads as "this member is here" while the deck silently points at
+     * nothing. Only `@Cls` (no member named) opens a class.
+     */
     private fun resolve(d: JadxDecompiler, ref: Ref): JavaNode? {
         if (ref.member != null) {
             val cls = resolveClass(d, ref.name) ?: return null
-            return resolveMember(d, cls, ref.member) ?: cls
+            return resolveMember(d, cls, ref.member)
         }
         val name = ref.name
         resolveClass(d, name)?.let { return it }
 
+        // `a.b.C.member` — only after the whole name failed as a class, so a
+        // package-qualified class is never mistaken for a member reference
         val i = name.lastIndexOf('.')
         if (i > 0) {
             val cls = resolveClass(d, name.substring(0, i))
             if (cls != null) {
-                return resolveMember(d, cls, name.substring(i + 1)) ?: cls
+                return resolveMember(d, cls, name.substring(i + 1))
             }
         }
         if ('.' !in name) {

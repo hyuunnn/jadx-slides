@@ -37,7 +37,9 @@ plus running jadx-gui. Target: brew jadx **1.5.5** (`compileOnly` pins).
   to hidden siblings `.<name>.jadx-slides.md/.html` next to the deck.
 - `Engines`: Marp = one-shot `marp --html` per save (WatchService+debounce);
   Slidev = dev server, port parsed from its OWN banner (ANSI-stripped).
-- `JumpService` resolves FQN / smali / short names (orig + renamed alias)
+- `JumpService` resolves FQN / smali / short names (orig + renamed alias).
+  A NAMED MEMBER MUST EXIST — no falling back to the enclosing class, which
+  would make a typo'd or stale `@Cls.member` look like a working jump
   via jadx-gui internals; resolution OFF the EDT, UI jump ON it.
 - View: custom `SlidesNode(JNode)`/`SlidesContentPanel` opened through
   `TabsController.selectTab` (semi-sanctioned pattern; unknown node types

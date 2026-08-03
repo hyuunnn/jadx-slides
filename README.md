@@ -92,7 +92,11 @@ jadx-gui() {
 Renamed items match on both the original and the alias name, so decks keep
 working as you rename during analysis. Tokens inside fenced code blocks,
 inline backticks, and the front matter are left alone so decks can document
-the syntax itself. Unknown names are logged to the jadx log when clicked.
+the syntax itself. A name that does not resolve does nothing when clicked
+(it is logged to the jadx log) — including `@Class.member` where the class
+exists but the member does not: landing on the class would read as "this
+member is here" when the deck is pointing at nothing. Only `@Class`, with
+no member named, opens a class.
 
 ## Writing decks
 
