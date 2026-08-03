@@ -25,7 +25,18 @@ class SlidesPanel(
 ) : JPanel(BorderLayout()) {
 
     private val title = JLabel("jadx-slides", SwingConstants.LEFT)
-    private val status = JLabel("Starting…", SwingConstants.CENTER)
+
+    // a JEditorPane, not a JLabel: status messages carry the JADX_GUI_OPTS
+    // relaunch command, which must be drag-selectable and copyable
+    private val status = javax.swing.JEditorPane("text/html", "<html>Starting…</html>").apply {
+        isEditable = false
+        isOpaque = false
+        putClientProperty(javax.swing.JEditorPane.HONOR_DISPLAY_PROPERTIES, true)
+        font = javax.swing.UIManager.getFont("Label.font")
+    }
+
+    // centers the (top-aligned) editor pane the way the old label centered
+    private val statusWrap = JPanel(java.awt.GridBagLayout()).apply { add(status) }
     private val content = JPanel(BorderLayout())
     private val dockToggle = JButton("Dock")
 
@@ -52,7 +63,7 @@ class SlidesPanel(
         bar.add(JButton("Close").apply { addActionListener { onClose() } })
         add(bar, BorderLayout.NORTH)
 
-        content.add(status, BorderLayout.CENTER)
+        content.add(statusWrap, BorderLayout.CENTER)
         add(content, BorderLayout.CENTER)
     }
 
@@ -74,7 +85,7 @@ class SlidesPanel(
         status.text = "<html><div style='text-align:center;padding:12px'>$text</div></html>"
         if (browserComponent == null) {
             content.removeAll()
-            content.add(status, BorderLayout.CENTER)
+            content.add(statusWrap, BorderLayout.CENTER)
             content.revalidate()
             content.repaint()
         }
@@ -135,7 +146,9 @@ class SlidesPanel(
     private fun doDetach() {
         browserComponent = null
         content.removeAll()
-        content.add(status, BorderLayout.CENTER)
+        // statusWrap is a field built at construction — nothing here loads
+        // a class for the first time (quit-path rule)
+        content.add(statusWrap, BorderLayout.CENTER)
         content.revalidate()
         content.repaint()
     }

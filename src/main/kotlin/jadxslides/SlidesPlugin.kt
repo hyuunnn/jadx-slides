@@ -34,6 +34,9 @@ class SlidesPlugin : JadxPlugin {
         Slides.ctx = context
         val gui = context.guiContext ?: return
         Slides.gui = gui
+        // at startup, into the launching terminal — so the flags are visible
+        // and copyable before the user even opens a deck
+        Slides.printMacOpensHintOnce()
         gui.addMenuAction("Open Slides…") { Slides.openAction() }
         runCatching {
             gui.registerGlobalKeyBinding("jadx-slides:open", "ctrl shift M") { Slides.openAction() }
@@ -470,12 +473,33 @@ object Slides {
         }, "jadx-slides-cef").apply { isDaemon = true }.start()
     }
 
-    private fun useBrowserFallback(s: DeckSession, p: SlidesPanel, missing: List<String>) {
+    /** `JADX_GUI_OPTS=…` relaunch command for the missing --add-opens flags. */
+    private fun relaunchCommand(missing: List<String>): String {
         val opts = missing.joinToString(" ") { "--add-opens=java.desktop/$it=ALL-UNNAMED" }
+        return "JADX_GUI_OPTS=\"$opts\" jadx-gui"
+    }
+
+    // once per process, not per project open; init may run on a different
+    // thread on a later project open
+    @Volatile private var optsHintPrinted = false
+
+    /** Print the relaunch command to the terminal jadx was started from —
+     * a place it can always be copied from, unlike a dialog. */
+    fun printMacOpensHintOnce() {
+        if (optsHintPrinted) return
+        val missing = CefHolder.macOpensMissing()
+        if (missing.isEmpty()) return
+        optsHintPrinted = true
+        println("jadx-slides: the embedded slides view needs JVM flags; relaunch with:")
+        println("  " + relaunchCommand(missing))
+    }
+
+    private fun useBrowserFallback(s: DeckSession, p: SlidesPanel, missing: List<String>) {
+        val cmd = relaunchCommand(missing)
         p.showStatus(
             "The embedded browser needs JVM flags jadx wasn't started with.<br>" +
                     "The deck was opened in the system browser instead.<br><br>" +
-                    "To embed slides here, relaunch with:<br><code>JADX_GUI_OPTS=\"$opts\" jadx-gui</code>",
+                    "To embed slides here, relaunch with:<br><code>$cmd</code>",
         )
         openExternal(s.url)
         if (!macOpensWarned) {
@@ -483,7 +507,7 @@ object Slides {
             JOptionPane.showMessageDialog(
                 mainWindow(),
                 "jadx-slides: the embedded browser needs extra JVM flags on macOS.\n\n" +
-                        "Relaunch jadx-gui with:\n\nJADX_GUI_OPTS=\"$opts\" jadx-gui\n\n" +
+                        "Relaunch jadx-gui with:\n\n$cmd\n\n" +
                         "Until then decks open in the system browser (jump links still work).",
                 "jadx-slides",
                 JOptionPane.INFORMATION_MESSAGE,
