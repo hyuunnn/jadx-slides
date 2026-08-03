@@ -27,10 +27,21 @@ class SlidesPlugin : JadxPlugin {
         "jadx-slides",
     )
 
+    /**
+     * jadx closes the plugin classloader and builds a fresh one on every
+     * project open, so `Slides` does NOT actually survive — a new object
+     * comes with it. The global AWT listeners would then pile up one set per
+     * project open, each pinned to a dead panel; a docked deck keeps the
+     * stale set's `isShowing` true, so it goes on swallowing nav keys
+     * against a flag the live instance cannot reach. Take them out here.
+     */
+    override fun unload() {
+        runCatching { Slides.removeKeyGuard() }
+    }
+
     override fun init(context: JadxPluginContext) {
-        // jadx re-instantiates plugins on every project open: long-lived
-        // state (bridge, CefApp, open deck) lives in the Slides object,
-        // only the context references are swapped
+        // jadx builds a fresh classloader (and a fresh Slides) per project
+        // open; only CefApp and the natives are genuinely process-wide
         Slides.ctx = context
         val gui = context.guiContext ?: return
         Slides.gui = gui
@@ -96,6 +107,9 @@ object Slides {
     private var movingPanel = false // tab close caused by dock toggle, not the user
     private var cefCleanupInstalled = false
     private var keyGuardInstalled = false
+    // held so unload() can remove them — see removeKeyGuard
+    private var keyDispatcher: java.awt.KeyEventDispatcher? = null
+    private var awtEventListener: java.awt.event.AWTEventListener? = null
     @Volatile private var cefStarting = false // first browser build in flight
 
     /** Bumped on every open/close; an openDeck whose generation is stale
@@ -108,21 +122,34 @@ object Slides {
 
     /**
      * Called from the bridge's /kbd endpoint: the injected page script saw a
-     * real pointer-down inside the deck. This is the ONLY setter of
-     * [browserHasKeyboard] — CEF focus callbacks are not used as a signal
-     * because CefClient's internal setFocus echo re-fires onGotFocus in an
-     * endless loop on macOS (observed live), which kept re-arming the flag
-     * after the user had already clicked back into the code area.
-     * (If the deck is ALSO open in an external browser its clicks ping too;
-     * the isShowing guard plus the focusOwner listener make that harmless.)
+     * real pointer-down inside the deck. Together with [onWindowActivated]
+     * this is what hands the keyboard to the browser — CEF focus callbacks
+     * are never used as the signal, because CefClient's internal setFocus
+     * echo re-fires onGotFocus in an endless loop on macOS (observed live),
+     * which kept re-arming the flag after the user had already clicked back
+     * into the code area.
+     *
+     * Only the EMBEDDED browser pings: the script is injected by the CEF
+     * load handler, never into the HTML the bridge serves, so a copy of the
+     * deck open in a real browser carries none. The endpoint itself is
+     * unauthenticated (as `/jump` already is) — the guards here are what
+     * keep a stray ping harmless.
      */
     fun deckPointerDown() {
         SwingUtilities.invokeLater {
             if (panel?.browserComponent?.isShowing != true) return@invokeLater
+            // the native browser is not subject to AWT modality, so a click
+            // reaches the deck even while a dialog is up — parking the AWT
+            // focus then yanks the caret out of that window's text field.
+            // Testing the FOCUSED WINDOW rather than modality also covers
+            // jadx's search, usage and log windows, which are JFrames and
+            // would slip past a Dialog check
+            val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+            if (kfm.focusedWindow !== mainWindow()) return@invokeLater
             browserHasKeyboard = true
             // keys reach BOTH the native browser and the AWT focus owner —
             // park the AWT side so only the deck moves
-            KeyboardFocusManager.getCurrentKeyboardFocusManager().clearGlobalFocusOwner()
+            kfm.clearGlobalFocusOwner()
         }
     }
 
@@ -152,9 +179,16 @@ object Slides {
         if (keyGuardInstalled) return
         keyGuardInstalled = true
         val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
-        kfm.addKeyEventDispatcher { e ->
+        val dispatcher = java.awt.KeyEventDispatcher { e ->
             browserHasKeyboard &&
                     e.keyCode in NAV_KEYS &&
+                    // the deck can only own keys while the window it lives in
+                    // does: jadx's search/usage/log windows and every dialog
+                    // gain focus with cause=ACTIVATION, which the clearer
+                    // below deliberately ignores, so without this the guard
+                    // would eat arrows aimed at them and move the slides
+                    // instead
+                    kfm.focusedWindow === mainWindow() &&
                     // clearGlobalFocusOwner leaves the owner null, so the flag
                     // can survive interactions that never take focus (menus,
                     // scrollbars) — never swallow keys an open menu needs,
@@ -162,13 +196,15 @@ object Slides {
                     panel?.browserComponent?.isShowing == true &&
                     javax.swing.MenuSelectionManager.defaultManager().selectedPath.isEmpty()
         }
+        keyDispatcher = dispatcher
+        kfm.addKeyEventDispatcher(dispatcher)
         // Who owns the keyboard is decided by user actions only. A focus
         // change caused by macOS re-activating the window is NOT one: it
         // restores whatever had focus before the app lost it, which used to
         // hand the keyboard back to the code area even though the user had
         // just clicked the deck to come back (log-verified:
         // `FOCUS_GAINED CodeArea cause=ACTIVATION`).
-        java.awt.Toolkit.getDefaultToolkit().addAWTEventListener({ ev ->
+        val awtListener = java.awt.event.AWTEventListener { ev ->
             when {
                 ev is java.awt.event.FocusEvent &&
                         ev.id == java.awt.event.FocusEvent.FOCUS_GAINED -> {
@@ -186,10 +222,36 @@ object Slides {
                     if (c != null && c !== panel?.browserComponent) browserHasKeyboard = false
                 }
                 ev is java.awt.event.WindowEvent &&
-                        ev.id == java.awt.event.WindowEvent.WINDOW_ACTIVATED -> onWindowActivated()
+                        ev.id == java.awt.event.WindowEvent.WINDOW_ACTIVATED ->
+                    // only the main frame: a dialog opening is an activation
+                    // too, and handing the deck the keyboard then leaves the
+                    // dialog unable to receive arrows/Space
+                    if (ev.window === mainWindow()) onWindowActivated()
             }
-        }, java.awt.AWTEvent.FOCUS_EVENT_MASK or java.awt.AWTEvent.MOUSE_EVENT_MASK
-                or java.awt.AWTEvent.WINDOW_EVENT_MASK)
+        }
+        awtEventListener = awtListener
+        java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(
+            awtListener,
+            java.awt.AWTEvent.FOCUS_EVENT_MASK or java.awt.AWTEvent.MOUSE_EVENT_MASK
+                    or java.awt.AWTEvent.WINDOW_EVENT_MASK,
+        )
+    }
+
+    /**
+     * jadx builds a FRESH classloader (and therefore a fresh `Slides`) for
+     * every project open — the plugin's `unload()` is the only chance to take
+     * these global listeners back out. Left behind they pile up one per
+     * project open, each pinned to a dead panel and a closed classloader, and
+     * a docked deck keeps the stale one's `isShowing` true so it goes on
+     * swallowing nav keys against a flag nothing can clear.
+     */
+    fun removeKeyGuard() {
+        val kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        keyDispatcher?.let { kfm.removeKeyEventDispatcher(it) }
+        awtEventListener?.let { java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(it) }
+        keyDispatcher = null
+        awtEventListener = null
+        keyGuardInstalled = false
     }
 
     /**
