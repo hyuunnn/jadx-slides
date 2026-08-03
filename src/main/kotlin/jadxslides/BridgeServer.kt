@@ -112,6 +112,16 @@ class BridgeServer : NanoHTTPD("127.0.0.1", 0) {
                 return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
             }
 
+            // a real pointer-down inside the embedded deck page (reported by
+            // the script injected in Slides.showView). This — and nothing
+            // else — hands the keyboard to the browser: CEF focus callbacks
+            // proved unusable as a signal (CefClient's setFocus echo loops
+            // endlessly on macOS and outlasts any debounce window)
+            "/kbd" -> {
+                Slides.deckPointerDown()
+                return cors(newFixedLengthResponse(Response.Status.NO_CONTENT, "text/plain", ""))
+            }
+
             "/version" -> return cors(
                 noCache(
                     newFixedLengthResponse(

@@ -96,9 +96,20 @@ and routed through `Slides.requestQuit`.
   strictly worse than DockManager), JxBrowser (commercial).
 - **Keyboard**: macOS delivers keys to BOTH the native browser and the AWT
   focus owner. A global KeyEventDispatcher swallows nav keys while
-  `browserHasKeyboard` (set by the CEF focus handler, which also clears the
-  AWT focus owner). Guards: open menus and a non-showing deck are never
-  swallowed. After an `@` jump, the code area legitimately owns the keys.
+  `browserHasKeyboard`. The flag is set ONLY by a real pointer-down inside
+  the deck page (script injected on every load via CefLoadHandler pings the
+  bridge's `/kbd`, which also parks the AWT focus) and cleared ONLY by the
+  AWT focusOwner listener. **Never use CEF focus callbacks as this signal**:
+  CefClient echoes `setFocus(true)` on its own and macOS re-fires
+  `onGotFocus` for it in an endless loop (observed live: a continuous
+  callback stream while the deck is focused) that outlasts any debounce and
+  kept re-arming the flag after the user clicked back into the code area —
+  Dock-only symptom, Tab mode hides the deck and masks it. Calling
+  `setFocus` inside a callback additionally recursed to a
+  StackOverflowError, and `onSetFocus` is never consulted for the echo, so
+  cancelling there does nothing. Guards: open menus and a non-showing deck
+  are never swallowed. After an `@` jump, the code area legitimately owns
+  the keys.
 - **Slidev**: Node ≥17 binds "localhost" to ::1 only → probe BOTH stacks;
   trust the banner's port (vite silently auto-increments on conflict).
   Child processes are killed as a TREE (Windows `.cmd` shim would orphan

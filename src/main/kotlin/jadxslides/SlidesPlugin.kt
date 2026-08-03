@@ -7,7 +7,6 @@ import jadx.api.plugins.gui.JadxGuiContext
 import jadx.gui.ui.MainWindow
 import org.cef.CefClient
 import org.cef.browser.CefBrowser
-import org.cef.handler.CefFocusHandlerAdapter
 import org.slf4j.LoggerFactory
 import java.awt.Desktop
 import java.awt.KeyboardFocusManager
@@ -103,6 +102,33 @@ object Slides {
 
     /** True while the CEF browser owns the keyboard (last click was on slides). */
     @Volatile private var browserHasKeyboard = false
+
+    /**
+     * Called from the bridge's /kbd endpoint: the injected page script saw a
+     * real pointer-down inside the deck. This is the ONLY setter of
+     * [browserHasKeyboard] — CEF focus callbacks are not used as a signal
+     * because CefClient's internal setFocus echo re-fires onGotFocus in an
+     * endless loop on macOS (observed live), which kept re-arming the flag
+     * after the user had already clicked back into the code area.
+     * (If the deck is ALSO open in an external browser its clicks ping too;
+     * the isShowing guard plus the focusOwner listener make that harmless.)
+     */
+    fun deckPointerDown() {
+        SwingUtilities.invokeLater {
+            if (panel?.browserComponent?.isShowing != true) return@invokeLater
+            browserHasKeyboard = true
+            // keys reach BOTH the native browser and the AWT focus owner —
+            // park the AWT side so only the deck moves
+            KeyboardFocusManager.getCurrentKeyboardFocusManager().clearGlobalFocusOwner()
+        }
+    }
+
+    /** Injected into every page the embedded browser loads (all engines). */
+    private fun kbdPingJs(): String =
+        "(function(){if(window.__jadxSlidesKbd)return;window.__jadxSlidesKbd=1;" +
+                "document.addEventListener('mousedown',function(){" +
+                "fetch('http://127.0.0.1:${bridge.port}/kbd',{mode:'no-cors'})" +
+                ".catch(function(){});},true);})();"
 
     private val NAV_KEYS = setOf(
         java.awt.event.KeyEvent.VK_LEFT, java.awt.event.KeyEvent.VK_RIGHT,
@@ -395,25 +421,23 @@ object Slides {
                         // only after createBrowser leaked the client (and its
                         // focus handler) whenever createBrowser threw
                         cefClient = client
-                        // keys reach both the native browser and whichever
-                        // Swing component holds the AWT focus (the code area
-                        // — so arrow keys moved slides AND code); park the
-                        // AWT focus while the browser owns the keyboard
-                        client.addFocusHandler(object : CefFocusHandlerAdapter() {
-                            override fun onGotFocus(browser: CefBrowser) {
-                                if (browserHasKeyboard) return
-                                browserHasKeyboard = true
-                                // CEF calls this on the AppKit thread —
-                                // AWT focus state must be mutated on the EDT
-                                SwingUtilities.invokeLater {
-                                    KeyboardFocusManager.getCurrentKeyboardFocusManager()
-                                        .clearGlobalFocusOwner()
-                                }
-                                browser.setFocus(true)
-                            }
-
-                            override fun onTakeFocus(browser: CefBrowser, next: Boolean) {
-                                browserHasKeyboard = false
+                        // NO CefFocusHandler — two failure modes were traced
+                        // to using CEF focus callbacks as the keyboard
+                        // signal: calling setFocus inside them recursed to a
+                        // StackOverflowError, and CefClient's own setFocus
+                        // echo re-fires onGotFocus in an endless loop that
+                        // outlasts any debounce, re-arming the flag after
+                        // the user clicked back into the code area. Instead
+                        // the deck page itself reports real pointer-downs
+                        // (script below → /kbd → deckPointerDown).
+                        client.addLoadHandler(object : org.cef.handler.CefLoadHandlerAdapter() {
+                            override fun onLoadEnd(
+                                browser: CefBrowser,
+                                frame: org.cef.browser.CefFrame?,
+                                httpStatusCode: Int,
+                            ) {
+                                if (frame == null || !frame.isMain) return
+                                browser.executeJavaScript(kbdPingJs(), frame.url, 0)
                             }
                         })
                         installKeyGuard()
